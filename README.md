@@ -22,6 +22,7 @@ cargo run -- cpu       # open the browser on a specific page
 cargo run -- --json --bench   # include a benchmark run in the report
 cargo run -- --keys    # the resolved keybindings
 cargo run -- --theme   # the resolved palette
+cargo run -- -c ./try.toml --keys   # check a config before installing it
 ```
 
 With Nix:
@@ -31,6 +32,17 @@ nix run .
 nix develop            # cargo, clippy, rust-analyzer, plus pciutils/lm_sensors for cross-checking
 nix flake check        # builds, runs the test suite, and lints with clippy -D warnings
 ```
+
+A desktop entry is at [`assets/hitui.desktop`](assets/hitui.desktop), installed
+by the Nix package; copy it to `~/.local/share/applications/` otherwise. It sets
+`Terminal=true`, since a TUI launched without a tty exits immediately.
+
+Its `Icon=hardinfo` is a name, not a file: icon names resolve through whatever
+icon theme is in use, so this needs no hardinfo2 installed. Papirus and its
+derivatives ship a `hardinfo` icon, and it is the closest match to what this is.
+Breeze and current Adwaita ship none of the old freedesktop application names,
+so there the entry falls back to a generic icon — change `Icon=` to taste, or to
+`computer`, which is the one name every theme does carry.
 
 ## Keys
 
@@ -81,9 +93,103 @@ colourscheme. The fifteen slots are `fg`, `bg`, `dim`, `border`,
 `border_focused`, `heading`, `accent`, `cursor_fg`, `cursor_bg`, `status_fg`,
 `status_bg`, `gauge_track`, `ok`, `warn`, `danger`.
 
-`hitui --theme` prints the resolved result and marks which slots an override
-took over, which is the quick way to tell a bad hex code from a slot name you
-misremembered.
+Under `terminal`, the three quiet slots — `dim`, `border`, `gauge_track` — are
+drawn with the terminal's **dim attribute** on its own foreground rather than
+in a colour. No colour works there without knowing the background: ANSI 8 is a
+mid-grey on a dark theme and all but invisible on a light one (1.05:1 contrast
+against rose-pine-dawn, where 3:1 is the floor for legible text), and ANSI 7 is
+exactly what `reset` resolves to, so `dim` would come out the colour of the
+text it sits behind. Giving any of the three a colour turns the attribute off
+for that slot. A terminal that ignores SGR 2 draws them at normal weight —
+unsubordinated but legible, which beats invisible.
+
+Colour names are normalised the way ratatui normalises its own — lowercased,
+spaces/hyphens/underscores dropped, `bright` read as `light`, `grey` as `gray`
+— so `bright-red`, `brightred` and `light_red` are one spelling and a value
+copied from another ratatui application means here what it meant there. Two
+words are refused rather than guessed, because they parse in both vocabularies
+with a different colour each:
+
+| Word | Why | Write instead |
+| --- | --- | --- |
+| `white` | ANSI 7 to some tools, ANSI 15 to ratatui | `gray`, or `bright-white` |
+| `bright-gray` | reads as ANSI 8; ratatui folds it to white at ANSI 15 | `dark-gray`, or `bright-white` |
+
+`hitui --theme` prints the resolved result and marks which layer won for each
+slot, which is the quick way to tell a bad hex code from a slot name you
+misremembered. `hitui -c <path> --theme` does it for a config you have not
+installed yet.
+
+### Colour overlay
+
+Tools that recolour a desktop from the current wallpaper — wallust, pywal —
+re-extract a palette on every wallpaper change, and have no business owning the
+file that also holds your keybindings. So hitui reads an optional second file
+holding colours only:
+
+```
+$XDG_CACHE_HOME/wallust/colors-hitui.toml
+~/.cache/wallust/colors-hitui.toml      # when XDG_CACHE_HOME is unset
+$HITUI_COLORS_OVERLAY                   # overrides both
+```
+
+Its shape is a **top-level `[colors]` table** — not `[theme.colors]` — matching
+every other file in such a template directory:
+
+```toml
+[colors]
+dim = "#6c7086"
+border = "#45475a"
+```
+
+Entries merge over `[theme.colors]` key by key, so an overlay naming only
+`border` leaves the other fourteen alone. hitui is a fresh process every
+launch, so the next run already has the new colours and there is no reload hook
+to arrange.
+
+A missing, unreadable or malformed overlay means "use the config", silently —
+that is the normal state for any palette that is not wallpaper-derived, and it
+also covers the file being half-written when hitui starts. A key that is *not*
+a colour slot is dropped rather than fatal, unlike the same key in
+`[theme.colors]`: a wallpaper must not be able to stop you reading your
+hardware. It is not dropped quietly, though — `--theme` names it, because a
+generated typo is permanent and nothing else would ever mention it.
+
+The same seam, under `BLUETUI_COLORS_OVERLAY`, exists in
+[bluetui](https://github.com/guttermonk/bluetui); the two are deliberately the
+same shape so one generator can feed both.
+
+### Layout
+
+Pages whose fields are narrow are laid out in columns rather than one tall
+strip. Memory Usage is 90 lines of 30-character rows; in one column it scrolls
+while three quarters of the pane sits empty, and in three it fits on one
+screen:
+
+```
+Overview                       All /proc/meminfo              All /proc/meminfo (cont.)
+  Total             31.07 GiB    MemTotal          31.07 GiB     SecPageTables     0 B
+  Used              8.00 GiB     MemFree           2.07 GiB      NFS_Unstable      0 B
+  Available         23.07 GiB    MemAvailable      23.07 GiB     Bounce            0 B
+```
+
+Nothing is configured per page. Two measurements decide it:
+
+- **A page is only split if it does not fit the screen in one column.** Columns
+  are there to stop a page overflowing; cutting up a page that already fits
+  costs readability and buys nothing. Resize the terminal and the columns come
+  and go.
+- **A column has to make the page shorter to be worth taking.** Each candidate
+  count is laid out and the heights compared, which is what keeps pages of long
+  values in one wide column — wrapping the CPU flag list or an environment
+  variable into narrow columns makes the page *taller*, so they never qualify.
+
+Breaks prefer section boundaries, so Sensors splits between chips rather than
+through one. A section too tall to fit a column flows into the next, with its
+heading repeated and marked `(cont.)`. Gauges set a floor on how narrow a
+column may get, since a bar and its caption cannot wrap.
+
+`[layout] max_columns` caps it; `1` keeps every page in a single column.
 
 ### Keybindings
 
@@ -195,8 +301,8 @@ Three rules hold this together:
    against a dying disk can block indefinitely, and a page missing a column
    beats a page that never draws.
 
-Optional tools in use or planned: `lspci`, `lsusb`, `smartctl`, `vulkaninfo`,
-`glxinfo`, `dmidecode`.
+Optional tools in use or planned: `lspci`, `lsusb`, `smartctl`, `fwupdmgr`,
+`vulkaninfo`, `glxinfo`, `dmidecode`.
 
 Prefer a tool's structured output over its human-readable report where one
 exists. `smartctl --json` is parsed as JSON rather than scraped, which also
@@ -228,6 +334,11 @@ Where hitui goes further than hardinfo2:
   sysctls as "1 — hidden from unprivileged users"; TCP state `0A` as `LISTEN`.
 - **Security** covers hardening sysctls, lockdown, module signing and
   IOMMU/passthrough readiness, which hardinfo2 does not report.
+- **Firmware says whether it is current**, not just which version is running:
+  the installed build's release date, the newest build's name and date, and how
+  many releases separate them. A version number alone cannot answer "am I
+  behind", and it is how this machine's UEFI dbx turned out to be four
+  revocation lists out of date. hardinfo2 reports the version and stops.
 
 Still planned beyond parity: bluetooth, package repositories, RAID/LVM volume
 topology.
@@ -268,7 +379,8 @@ the secret in a paste.
 - [x] **Monitors** — DRM connectors with full EDID decoding
 - [x] **PCI Devices** — `/sys/bus/pci`, names via `lspci` when installed
 - [x] **USB Devices** — `/sys/bus/usb` as a port tree, names via `lsusb` when needed
-- [x] **Firmware** — UEFI, Secure Boot via efivarfs, TPM version and PCR banks
+- [x] **Firmware** — UEFI, Secure Boot via efivarfs, TPM version and PCR banks,
+      and firmware currency via `fwupdmgr`
 - [x] **Printers** — CUPS queues via `lpstat`
 - [x] **Battery** — `/sys/class/power_supply`, including wear against design capacity
 - [x] **Sensors** — `/sys/class/hwmon` (temperature, fan, voltage, current, power)
@@ -309,6 +421,9 @@ Places where hitui deliberately departs from hardinfo2:
 - **Field search.** `/` filters fields on the current page, keeping enclosing
   sections for context. hardinfo2 has no search at all, and a CPU flag list is
   180 entries long.
+- **Pages use the width they are given.** hardinfo2 is a two-column name/value
+  table however wide the window gets. Pages here are split into columns when
+  that stops them scrolling — see [Layout](#layout).
 - **JSON reports.** `--json` emits the same tree the TUI renders, so hitui is
   usable from scripts. hardinfo2 exports HTML and plain text intended for
   reading, not parsing.
@@ -331,3 +446,13 @@ because their current value *is* the fact you came for: memory in use, disk
 free space, sensor readings, battery charge, link state. hardinfo2 refreshes
 its Summary memory figure every second for the same reason. What's excluded is
 *history* and *rates* — the things a monitor exists to show.
+
+## Licence
+
+GPL-3.0-or-later; see [LICENSE](LICENSE).
+
+hitui is a from-scratch reimplementation rather than a port — none of
+hardinfo2's GPL-2.0 source is used, and the desktop entry reuses its icon by
+*name* only, which is a string resolved through your icon theme and not
+artwork carried in this repo. The licence was therefore a free choice, made to
+match the sibling TUIs rather than to discharge an obligation.

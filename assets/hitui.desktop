@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=hitui
+GenericName=System Information
+Comment=Browse this machine's hardware, firmware and network configuration
+Exec=hitui
+TryExec=hitui
+# A terminal program: the desktop environment has to give it one. Without
+# this the entry launches with no tty and exits immediately.
+Terminal=true
+# Icon names resolve through the icon theme, not through the package that
+# first used them, so this needs no hardinfo2 installed — Papirus and Breeze
+# both ship a "hardinfo" icon and it is the closest match to what this is.
+Icon=hardinfo
+# System is the main category; ConsoleOnly tells a menu this is not a
+# graphical application. Deliberately not Monitor: hitui reports what the
+# machine is, not what it is doing.
+Categories=System;ConsoleOnly;
+Keywords=hardware;sysinfo;system;information;cpu;memory;pci;usb;firmware;sensors;smart;benchmark;
+StartupNotify=false

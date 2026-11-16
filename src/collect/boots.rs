@@ -10,7 +10,7 @@ use anyhow::Result;
 use serde_json::Value as Json;
 
 use crate::collect::{Collector, Group};
-use crate::model::{Node, format_duration, format_timestamp};
+use crate::model::{Node, format_duration, format_timestamp, unix_now};
 use crate::probe;
 use crate::sysfs;
 
@@ -135,13 +135,6 @@ fn history() -> Node {
 }
 
 /// Seconds since the Unix epoch.
-fn unix_now() -> Option<i64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs() as i64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

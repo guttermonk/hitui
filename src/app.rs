@@ -234,6 +234,8 @@ pub struct App {
     pub palette: Palette,
     /// Resolved bindings, from `[keys.*]`.
     pub keymaps: Keymaps,
+    /// Ceiling on how many columns a page may be split into, from `[layout]`.
+    pub max_columns: usize,
     /// Keys pressed so far towards a chord. Empty unless one is in progress.
     pending: Vec<ModifiedKey>,
     quit: bool,
@@ -288,6 +290,7 @@ impl App {
                 .palette()
                 .unwrap_or_else(|_| theme::Preset::Terminal.palette()),
             keymaps: config.keymaps(),
+            max_columns: config.layout.max_columns,
             pending: Vec::new(),
             quit: false,
         }

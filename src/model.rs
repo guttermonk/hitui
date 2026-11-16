@@ -254,6 +254,24 @@ pub fn format_timestamp(seconds: i64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
 }
 
+/// A calendar date, without the time of day.
+///
+/// Firmware release dates and the like are stamped at midnight UTC, so
+/// rendering the time alongside them would be three characters of noise
+/// implying a precision the source does not have.
+pub fn format_date(seconds: i64) -> String {
+    let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Seconds since the Unix epoch.
+pub fn unix_now() -> Option<i64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
+}
+
 /// Days since the Unix epoch to a civil `(year, month, day)`.
 ///
 /// Howard Hinnant's `civil_from_days`, shifting the era to start in March so

@@ -7,8 +7,8 @@
 
 use anyhow::Result;
 
-use crate::collect::dmi;
 use crate::collect::{Collector, Group};
+use crate::collect::{dmi, fwupd};
 use crate::model::{Node, Value};
 use crate::sysfs;
 
@@ -32,7 +32,9 @@ impl Collector for Firmware {
     }
 
     fn collect(&mut self) -> Result<Vec<Node>> {
-        let mut nodes = vec![platform(), secure_boot()];
+        // Updates come second: whether this firmware is current is the first
+        // thing worth knowing after what it is.
+        let mut nodes = vec![platform(), fwupd::section(), secure_boot()];
         nodes.push(tpm());
         Ok(nodes)
     }
@@ -193,14 +195,23 @@ mod tests {
     fn collects_every_section() {
         let nodes = Firmware.collect().expect("collection failed");
         let labels: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
-        assert_eq!(labels, vec!["Platform", "Secure Boot", "TPM"]);
+        assert_eq!(
+            labels,
+            vec!["Platform", "Firmware updates", "Secure Boot", "TPM"]
+        );
 
         for node in &nodes {
             assert!(!node.children.is_empty(), "{} is empty", node.label);
         }
         // Secure Boot always states something, even when it cannot be read.
+        // Found by label rather than by index: a section inserted ahead of it
+        // should not be able to make this assertion test the wrong one.
+        let secure_boot = nodes
+            .iter()
+            .find(|node| node.label == "Secure Boot")
+            .expect("Secure Boot section");
         assert!(
-            nodes[1].children.iter().any(|c| c.label == "Enabled"),
+            secure_boot.children.iter().any(|c| c.label == "Enabled"),
             "Secure Boot state must always be reported"
         );
     }

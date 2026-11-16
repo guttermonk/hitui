@@ -17,10 +17,39 @@
 # "gruvbox-dark", "nord", "dracula", "one-dark", "solarized-dark".
 preset = "terminal"
 
+# Under "terminal", the three quiet slots -- dim, border and gauge_track --
+# are drawn with the terminal's dim attribute on its own foreground rather
+# than in a colour of their own. Naming a colour there is not possible without
+# knowing the background: ANSI 8 is a mid-grey on a dark theme and all but
+# invisible on a light one (1.05:1 contrast on rose-pine-dawn, where 3:1 is
+# the floor for legible text), and ANSI 7 is exactly what "reset" resolves to,
+# so dim would come out the same colour as the text it sits behind. Setting
+# any of the three to a colour below turns the attribute off for that slot --
+# a colour you chose is drawn as you chose it.
+#
 # Individual colours can be overridden on top of the preset. Values are either
-# hex ("#89b4fa" or "0x89b4fa") or an ANSI name: reset, black, red, green,
-# yellow, blue, magenta, cyan, gray, dark-gray, and bright-red through
-# bright-white.
+# hex ("#89b4fa" or "0x89b4fa") or an ANSI name:
+#
+#   reset / default                      the terminal's own
+#   black red green yellow               ANSI 0-3
+#   blue magenta cyan gray               ANSI 4-7   ("silver" also means gray)
+#   dark-gray                            ANSI 8     ("bright-black" too)
+#   bright-red .. bright-cyan            ANSI 9-14
+#   bright-white                         ANSI 15
+#
+# Names are normalised the way ratatui normalises its own -- lowercased, with
+# spaces, hyphens and underscores dropped, then "bright" read as "light" and
+# "grey" as "gray" -- so bright-red, brightred, light_red and lightred are one
+# spelling, and a value copied from another ratatui application's config means
+# here what it meant there.
+#
+# Two words are refused rather than guessed, because they parse in both
+# vocabularies with a different colour each:
+#
+#   white        ANSI 7 to some tools, ANSI 15 to ratatui. Write "gray" or
+#                "bright-white".
+#   bright-gray  reads as ANSI 8, but ratatui folds it to white at ANSI 15.
+#                Write "dark-gray" or "bright-white".
 #
 # Slots:
 #   fg              primary text
@@ -43,6 +72,60 @@ preset = "terminal"
 # border_focused = "#fabd2f"
 # dim = "dark-gray"
 # danger = "bright-red"
+
+# ─── Colour overlay ──────────────────────────────────────────────────────────
+#
+# There is no setting here: this documents a second file hitui reads, so that
+# the contract is discoverable from the repo rather than from whatever wrote
+# it.
+#
+# Tools that recolour a desktop from the current wallpaper -- wallust, pywal --
+# re-extract a palette on every wallpaper change, and have no business owning
+# the file that also holds your keybindings. So hitui reads an optional second
+# file holding colours only:
+#
+#   $XDG_CACHE_HOME/wallust/colors-hitui.toml
+#   ~/.cache/wallust/colors-hitui.toml        (when XDG_CACHE_HOME is unset)
+#   $HITUI_COLORS_OVERLAY                     (overrides both)
+#
+# Its shape is a top-level [colors] table -- not [theme.colors] -- matching
+# every other file in that template directory:
+#
+#   [colors]
+#   dim = "#6c7086"
+#   border = "#45475a"
+#   gauge_track = "#45475a"
+#
+# Its entries merge over [theme.colors] key by key, so an overlay naming only
+# "border" leaves the other fourteen as this file has them. hitui is a fresh
+# process every launch, so the next run already has the new colours and there
+# is no reload hook to arrange.
+#
+# A missing, unreadable or malformed overlay means "use the config", silently:
+# that is the normal state for every palette that is not wallpaper-derived,
+# and it also covers the file being half-written when hitui starts. A key that
+# is not a colour slot is dropped rather than fatal -- a wallpaper must not be
+# able to stop you reading your hardware -- but `hitui --theme` names what it
+# dropped, since a generated typo is permanent and would otherwise be silent.
+#
+# `hitui --theme` shows which layer won for every slot: the preset, this
+# file's [theme.colors], or the overlay.
+
+# ─── Layout ──────────────────────────────────────────────────────────────────
+
+[layout]
+# Pages whose fields are narrow — memory counters, sensor readings, socket
+# statistics — are split into columns so they fit on one screen instead of
+# scrolling past three quarters of an empty pane.
+#
+# This is a ceiling, not a target. A page is only split when it does not fit
+# the screen in one column, and only as far as actually makes it shorter:
+# pages of long values (Environment Variables, the CPU flag list) stay in one
+# wide column, because wrapping those into narrow columns makes them taller.
+# Narrow the terminal and the columns go away again.
+#
+# Set to 1 to keep every page in a single column.
+max_columns = 4
 
 # ─── Keybindings ─────────────────────────────────────────────────────────────
 #
@@ -73,7 +156,7 @@ preset = "terminal"
 # `unbind` is prefix-based: unbinding "g" also removes any "gg" chord, or `g`
 # would still be swallowed while hitui waited for the rest of a chord.
 #
-# Run `hitui keys` to see what a config resolves to. It also names any action
+# Run `hitui --keys` to see what a config resolves to. It also names any action
 # that ended up with no key at all -- which `base`, `set` and `unbind` can all
 # cause, and which is otherwise silent.
 #

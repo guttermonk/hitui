@@ -3,7 +3,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
@@ -21,6 +21,22 @@ use crate::sysfs;
 const SIDEBAR_WIDTH: u16 = 28;
 /// Clamp for the label column so a single long key cannot squeeze out values.
 const MAX_LABEL_WIDTH: usize = 38;
+/// Most columns the detail pane will split a page into. Past four, the label
+/// column costs more than the extra column buys on any real terminal.
+const MAX_COLUMNS: usize = 4;
+/// Blank cells between adjacent columns.
+const GUTTER: usize = 3;
+/// Narrowest column worth having: below this a label and its value cannot both
+/// fit, and every value would wrap.
+const MIN_COLUMN: usize = 26;
+/// How much shorter an extra column has to make the page to be worth taking.
+/// Equal height in narrower columns is a loss, not a draw.
+const COLUMN_GAIN: f64 = 0.85;
+/// Shortest bar still worth drawing.
+const MIN_BAR: usize = 8;
+/// Longest bar; past this the bar reads no more precisely and crowds out the
+/// caption.
+const MAX_BAR: usize = 24;
 
 /// The palette in force for this frame.
 ///
@@ -31,7 +47,34 @@ fn accent(p: &Palette) -> Style {
 }
 
 fn dim(p: &Palette) -> Style {
-    Style::default().fg(p.dim)
+    quiet(p.dim, p.faint.dim)
+}
+
+/// A colour, subordinated to the terminal's own foreground when the palette
+/// asks for the dim attribute instead of a colour of its own. See
+/// [`crate::config::theme::Faint`] for why the default preset does.
+fn quiet(color: Color, faint: bool) -> Style {
+    let style = Style::default().fg(color);
+    if faint {
+        style.add_modifier(Modifier::DIM)
+    } else {
+        style
+    }
+}
+
+/// A pane's border. The focused one names a colour; the others defer, since
+/// their job is to be present without being read.
+fn border(p: &Palette, focused: bool) -> Style {
+    if focused {
+        Style::default().fg(p.border_focused)
+    } else {
+        quiet(p.border, p.faint.border)
+    }
+}
+
+/// The unfilled part of a gauge bar.
+fn gauge_track(p: &Palette) -> Style {
+    quiet(p.gauge_track, p.faint.gauge_track)
 }
 
 fn heading(p: &Palette) -> Style {
@@ -176,7 +219,13 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
         );
         return;
     }
-    let lines = build_lines(&rows, content_width, p);
+    let lines = columnise(
+        &rows,
+        content_width,
+        inner.height as usize,
+        app.max_columns,
+        p,
+    );
 
     // Hand the geometry back to the app so key handling can page and clamp.
     let page = app.page_mut();
@@ -215,24 +264,63 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// Turn logical rows into rendered lines, wrapping long values into the value
-/// column so that flag lists and mitigation strings stay readable.
-fn build_lines(rows: &[&Row], width: usize, p: &Palette) -> Vec<Line<'static>> {
-    let label_width = rows
-        .iter()
+/// Width of the label column: the longest label on the page, bounded so that
+/// one long key cannot squeeze out the values, and so that a narrow column
+/// still leaves room for a value at all.
+fn label_width(rows: &[&Row], width: usize) -> usize {
+    let cap = MAX_LABEL_WIDTH.min(width.saturating_sub(10)).max(12);
+    rows.iter()
         .filter(|r| !r.is_spacer() && r.value.is_some())
         .map(|r| r.depth * 2 + r.label.chars().count())
         .max()
         .unwrap_or(16)
-        .clamp(12, MAX_LABEL_WIDTH);
+        .clamp(12, cap)
+}
 
-    // +2 for the gap between columns.
+/// A page rendered at one candidate column width, with what the packer needs
+/// to break it into columns without orphaning a field from its heading.
+#[derive(Default)]
+struct Flow {
+    lines: Vec<Line<'static>>,
+    /// Indices of lines that begin a top-level section — the places where a
+    /// column break costs nothing at all.
+    starts: Vec<usize>,
+    /// Indices of lines that begin a group of any depth. Second-choice break
+    /// points: breaking between two USB devices is far better than breaking
+    /// through the middle of one.
+    group_starts: Vec<usize>,
+    /// The chain of group headings enclosing each line, outermost first, so a
+    /// column that has to begin inside a group can name every group its first
+    /// field belongs to.
+    owner: Vec<Vec<usize>>,
+    /// Group heading lines, indexed by `owner`.
+    headings: Vec<Line<'static>>,
+}
+
+impl Flow {
+    fn push(&mut self, line: Line<'static>, owner: &[usize]) {
+        self.lines.push(line);
+        self.owner.push(owner.to_vec());
+    }
+}
+
+/// Render `rows` into a single column `width` cells wide, wrapping long values
+/// into the value column so flag lists and mitigation strings stay readable.
+fn flow_page(rows: &[&Row], width: usize, p: &Palette) -> Flow {
+    let label_width = label_width(rows, width);
+    // +2 for the gap between the label and value columns.
     let value_width = width.saturating_sub(label_width + 2).max(8);
-    let mut lines = Vec::new();
+
+    let mut flow = Flow::default();
+    // Headings enclosing the walk's current position, one per depth.
+    let mut chain: Vec<usize> = Vec::new();
 
     for row in rows {
+        // A row's enclosing groups are exactly the ones shallower than it.
+        chain.truncate(row.depth);
+
         if row.is_spacer() {
-            lines.push(Line::raw(""));
+            flow.push(Line::raw(""), &chain);
             continue;
         }
 
@@ -248,7 +336,17 @@ fn build_lines(rows: &[&Row], width: usize, p: &Palette) -> Vec<Line<'static>> {
             if let Some(source) = &row.source {
                 spans.push(Span::styled(format!("  via {source}"), dim(p)));
             }
-            lines.push(Line::from(spans));
+            let line = Line::from(spans);
+            if row.depth == 0 {
+                flow.starts.push(flow.lines.len());
+            }
+            flow.group_starts.push(flow.lines.len());
+            flow.headings.push(line.clone());
+            let heading = flow.headings.len() - 1;
+            // Pushed with the chain that encloses it, then added to the chain
+            // so its own children name it.
+            flow.push(line, &chain);
+            chain.push(heading);
             continue;
         }
 
@@ -271,7 +369,7 @@ fn build_lines(rows: &[&Row], width: usize, p: &Palette) -> Vec<Line<'static>> {
                     value_width,
                     p,
                 ));
-                lines.push(Line::from(spans));
+                flow.push(Line::from(spans), &chain);
             }
             _ => {
                 for (i, chunk) in wrap(&value.to_string(), value_width).iter().enumerate() {
@@ -281,12 +379,242 @@ fn build_lines(rows: &[&Row], width: usize, p: &Palette) -> Vec<Line<'static>> {
                         // Continuation lines leave the label column blank.
                         Span::raw(" ".repeat(label_width + 1))
                     };
-                    lines.push(Line::from(vec![label_span, Span::raw(chunk.clone())]));
+                    flow.push(
+                        Line::from(vec![label_span, Span::raw(chunk.clone())]),
+                        &chain,
+                    );
                 }
             }
         }
     }
-    lines
+    flow
+}
+
+/// Lay a page out across however many columns make it shortest.
+///
+/// Most of these pages are a narrow list of short values — memory counters,
+/// sensor readings, socket statistics — and in one column they run off the
+/// bottom of the screen while two thirds of the pane sits empty.
+///
+/// Two things decide the split, and both are measured rather than configured
+/// per page. A page is only split if it does not fit the screen in one column:
+/// columns are here to stop a page overflowing, and cutting up a page that
+/// already fits only makes it harder to read. Then each candidate column count
+/// is laid out and the resulting heights compared, which is what keeps pages
+/// of long values (CPU flag lists, environment variables) in one wide column —
+/// wrapping those into narrow columns makes the page *taller*, so they never
+/// clear the bar.
+fn columnise(
+    rows: &[&Row],
+    width: usize,
+    viewport: usize,
+    max_columns: usize,
+    p: &Palette,
+) -> Vec<Line<'static>> {
+    let flow = flow_page(rows, width, p);
+    // Clipped even in one column: a section heading is one long line that
+    // nothing wraps, and the pane edge would otherwise cut it off silently.
+    let mut best: Vec<Line<'static>> = flow
+        .lines
+        .iter()
+        .map(|line| Line::from(clip(line, width)))
+        .collect();
+    let mut best_height = best.len();
+    if best_height <= viewport {
+        return best;
+    }
+    // A gauge cannot wrap, so it sets a hard floor on the column width.
+    let floor = MIN_COLUMN.max(gauge_floor(rows, width));
+
+    for columns in 2..=max_columns.min(MAX_COLUMNS) {
+        let gutters = (columns - 1) * GUTTER;
+        let column_width = width.saturating_sub(gutters) / columns;
+        if column_width < floor {
+            break;
+        }
+
+        let flow = flow_page(rows, column_width, p);
+        let packed = cut(&flow, columns);
+        let height = packed.iter().map(Vec::len).max().unwrap_or(0);
+
+        // An extra column has to earn its keep. Equal height in narrower
+        // columns is a loss, and a marginal gain is not worth values that wrap
+        // where they used to fit.
+        if height as f64 > best_height as f64 * COLUMN_GAIN {
+            break;
+        }
+        best_height = height;
+        best = zip_columns(&packed, column_width);
+    }
+    best
+}
+
+/// Break a flowed page into `columns` of roughly equal height, preferring to
+/// break between sections.
+fn cut(flow: &Flow, columns: usize) -> Vec<Vec<Line<'static>>> {
+    let target = flow.lines.len().div_ceil(columns);
+    // How far from the ideal break a section boundary may be and still be
+    // worth snapping to. A third of a column keeps the columns visibly even.
+    let slack = (target / 3).max(2);
+
+    let mut bounds = vec![0usize];
+    for column in 1..columns {
+        let previous = *bounds.last().expect("bounds starts non-empty");
+        let ideal = (column * target).max(previous);
+        // A section boundary first; failing that, any group boundary; failing
+        // that, wherever the arithmetic lands.
+        let nearest = |candidates: &[usize]| {
+            candidates
+                .iter()
+                .copied()
+                .filter(|&start| start > previous && start.abs_diff(ideal) <= slack)
+                .min_by_key(|&start| start.abs_diff(ideal))
+        };
+        let at = nearest(&flow.starts)
+            .or_else(|| nearest(&flow.group_starts))
+            .unwrap_or(ideal)
+            .min(flow.lines.len());
+        bounds.push(at);
+    }
+    bounds.push(flow.lines.len());
+
+    let mut packed = Vec::with_capacity(columns);
+    for pair in bounds.windows(2) {
+        let (mut from, to) = (pair[0], pair[1]);
+        // A spacer that happened to land on a break would otherwise push the
+        // column's first row down a line.
+        while from < to && is_blank(&flow.lines[from]) {
+            from += 1;
+        }
+
+        let mut column = Vec::new();
+        // A column that does not start a whole section repeats every heading
+        // above its first row. One heading is not enough: a bare "Interfaces"
+        // belongs to a USB device whose name was left in the previous column,
+        // and "Releases ahead 2" to a firmware device in the same position.
+        if from > 0 && from < to && !flow.starts.contains(&from) {
+            let chain = flow.owner.get(from).cloned().unwrap_or_default();
+            for (depth, heading) in chain.iter().enumerate() {
+                let line = &flow.headings[*heading];
+                // Only the innermost one is interrupted; the outer ones are
+                // simply context.
+                if depth + 1 == chain.len() {
+                    column.push(continued(line));
+                } else {
+                    column.push(line.clone());
+                }
+            }
+        }
+        column.extend(flow.lines[from..to].iter().cloned());
+        while column.last().is_some_and(is_blank) {
+            column.pop();
+        }
+        packed.push(column);
+    }
+    packed
+}
+
+/// A section heading, marked as carrying on from the previous column.
+fn continued(heading: &Line<'static>) -> Line<'static> {
+    let mut spans = heading.spans.clone();
+    let style = spans.last().map(|s| s.style).unwrap_or_default();
+    spans.push(Span::styled(
+        " (cont.)",
+        style.remove_modifier(Modifier::BOLD),
+    ));
+    Line::from(spans)
+}
+
+/// Clip a line to `width` cells, marking the cut with an ellipsis.
+///
+/// A column has a neighbour to its right, so a line that overran would be
+/// drawing in someone else's space. Silent truncation is not an option either:
+/// a cut-off device name reads as a real, shorter name.
+fn clip(line: &Line<'static>, width: usize) -> Vec<Span<'static>> {
+    let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    if total <= width {
+        return line.spans.clone();
+    }
+
+    let mut out = Vec::new();
+    let mut used = 0;
+    for span in &line.spans {
+        let room = width - used;
+        if room == 0 {
+            break;
+        }
+        let count = span.content.chars().count();
+        if count < room {
+            out.push(span.clone());
+            used += count;
+            continue;
+        }
+        // Marked even when this span fits exactly, because the line does not:
+        // there is more of it after this span.
+        let text: String = span
+            .content
+            .chars()
+            .take(room.saturating_sub(1))
+            .chain(['…'])
+            .collect();
+        out.push(Span::styled(text, span.style));
+        break;
+    }
+    out
+}
+
+fn is_blank(line: &Line<'_>) -> bool {
+    line.spans.iter().all(|span| span.content.trim().is_empty())
+}
+
+/// Lay columns side by side, padding each to its width so the next one starts
+/// where it should, and clipping anything that would bleed into its neighbour.
+fn zip_columns(packed: &[Vec<Line<'static>>], column_width: usize) -> Vec<Line<'static>> {
+    let height = packed.iter().map(Vec::len).max().unwrap_or(0);
+    (0..height)
+        .map(|y| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (i, column) in packed.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw(" ".repeat(GUTTER)));
+                }
+                let mut used = 0;
+                if let Some(line) = column.get(y) {
+                    for span in clip(line, column_width) {
+                        used += span.content.chars().count();
+                        spans.push(span);
+                    }
+                }
+                // The last column needs no padding, and padding it would paint
+                // the pane's full width on every line.
+                if i + 1 < packed.len() {
+                    spans.push(Span::raw(" ".repeat(column_width - used)));
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// The narrowest column this page's gauges can survive.
+///
+/// A gauge is a bar plus a caption spelling out the absolutes. Unlike text it
+/// cannot wrap, so a column too narrow for one does not reflow — it cuts the
+/// numbers off.
+fn gauge_floor(rows: &[&Row], width: usize) -> usize {
+    let label_width = label_width(rows, width);
+    rows.iter()
+        .filter_map(|row| match row.value.as_ref() {
+            Some(Value::Gauge { percent, label, .. }) => Some(
+                label_width
+                    + 2
+                    + MIN_BAR
+                    + gauge_caption(*percent, label.as_deref()).chars().count(),
+            ),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// A bar, its percentage, and an optional caption spelling out the absolutes.
@@ -301,19 +629,17 @@ fn gauge_spans(
     width: usize,
     p: &Palette,
 ) -> Vec<Span<'static>> {
-    const MIN_BAR: usize = 8;
-    const MAX_BAR: usize = 24;
-
     let percent = percent.clamp(0.0, 100.0);
-    let caption = match label {
-        Some(label) => format!(" {percent:>5.1} %  {label}"),
-        None => format!(" {percent:>5.1} %"),
-    };
+    let caption = gauge_caption(percent, label);
 
     // Give the caption its space first; the bar takes what is left.
     let bar_width = width
         .saturating_sub(caption.chars().count())
-        .clamp(MIN_BAR, MAX_BAR);
+        .clamp(MIN_BAR, MAX_BAR)
+        // A column too narrow for even the shortest bar loses the bar rather
+        // than overflowing into whatever is drawn to its right.
+        .min(width);
+    let caption = ellipsise(&caption, width.saturating_sub(bar_width));
     let filled = (percent / 100.0 * bar_width as f64).round() as usize;
 
     // How far along the bad direction this reading sits.
@@ -331,12 +657,18 @@ fn gauge_spans(
 
     vec![
         Span::styled("█".repeat(filled), style),
-        Span::styled(
-            "░".repeat(bar_width - filled),
-            Style::default().fg(p.gauge_track),
-        ),
+        Span::styled("░".repeat(bar_width - filled), gauge_track(p)),
         Span::raw(caption),
     ]
+}
+
+/// The text beside a gauge's bar: the percentage, and the absolutes behind it
+/// where the collector supplied them.
+fn gauge_caption(percent: f64, label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!(" {percent:>5.1} %  {label}"),
+        None => format!(" {percent:>5.1} %"),
+    }
 }
 
 /// Shorten `text` to `width` columns, marking that it was cut.
@@ -567,10 +899,13 @@ fn draw_help(frame: &mut Frame, p: &Palette, keymaps: &Keymaps) {
 }
 
 fn pane_block(title: &str, focused: bool, p: &Palette) -> Block<'static> {
-    let border = if focused { accent(p) } else { dim(p) };
     Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(border)
+        // The `border` and `border_focused` slots, which until now were
+        // documented, settable, printed by --theme, and drawn by nothing: this
+        // reached for `accent` and `dim` instead, so two of the fifteen slots
+        // silently did nothing.
+        .border_style(border(p, focused))
         .title(Line::from(Span::styled(
             format!(" {title} "),
             if focused {
@@ -727,6 +1062,98 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn the_quiet_slots_are_drawn_faint_under_the_default_theme() {
+        // The fix for the default preset being unreadable on a light terminal:
+        // the quiet roles ask the terminal to subordinate its own foreground
+        // rather than naming a grey that only works on a dark background.
+        let config = crate::config::Config::from_str("").expect("the defaults are valid");
+        let mut app = App::with_config(&config);
+        app.page_mut().reload();
+
+        let style = style_of(&mut app, "Kernel").expect("a field label is drawn");
+        assert_eq!(
+            style.fg,
+            Some(Color::Reset),
+            "a field label should keep the terminal's foreground"
+        );
+        assert!(
+            style.add_modifier.contains(Modifier::DIM),
+            "a field label should be drawn faint, got {:?}",
+            style.add_modifier
+        );
+    }
+
+    #[test]
+    fn an_explicit_quiet_colour_is_drawn_as_chosen_not_faded() {
+        let config = crate::config::Config::from_str(
+            r##"
+            [theme.colors]
+            dim = "#ff0000"
+            "##,
+        )
+        .expect("valid config");
+        let mut app = App::with_config(&config);
+        app.page_mut().reload();
+
+        let style = style_of(&mut app, "Kernel").expect("a field label is drawn");
+        assert_eq!(style.fg, Some(Color::Rgb(0xff, 0, 0)));
+        assert!(
+            !style.add_modifier.contains(Modifier::DIM),
+            "a colour chosen explicitly should not also be faded"
+        );
+    }
+
+    #[test]
+    fn the_border_slots_are_the_ones_that_draw_the_borders() {
+        // These two slots were documented, settable and printed by --theme
+        // while being drawn by nothing: pane_block reached for `accent` and
+        // `dim` instead, so setting them did nothing at all.
+        let config = crate::config::Config::from_str(
+            r##"
+            [theme.colors]
+            border = "#00ff00"
+            border_focused = "#0000ff"
+            accent = "#ff0000"
+            "##,
+        )
+        .expect("valid config");
+        let mut app = App::with_config(&config);
+        app.page_mut().reload();
+
+        // The sidebar has focus on startup, so its border is the focused one
+        // and the detail pane's is not.
+        assert!(matches!(app.focus, Focus::Sidebar));
+        let (sidebar, detail) = border_colours(&mut app);
+        assert_eq!(sidebar, Some(Color::Rgb(0, 0, 0xff)), "focused border");
+        assert_eq!(detail, Some(Color::Rgb(0, 0xff, 0)), "unfocused border");
+
+        // And the other way round once focus moves, so neither is hardcoded.
+        app.focus = Focus::Detail;
+        let (sidebar, detail) = border_colours(&mut app);
+        assert_eq!(sidebar, Some(Color::Rgb(0, 0xff, 0)), "unfocused border");
+        assert_eq!(detail, Some(Color::Rgb(0, 0, 0xff)), "focused border");
+    }
+
+    /// The colour of each pane's top border, taken from the horizontal run
+    /// rather than a corner so it cannot be confused with the title.
+    fn border_colours(app: &mut App) -> (Option<Color>, Option<Color>) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(96, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // Row 1 is the top edge of both panes: the header occupies row 0.
+        let colour_at = |x: u16| buffer[(x, 1u16)].style().fg;
+        // Inside the sidebar's title run, and inside the detail pane's.
+        (
+            colour_at(SIDEBAR_WIDTH - 2),
+            colour_at(buffer.area.width - 3),
+        )
     }
 
     #[test]
@@ -889,5 +1316,247 @@ mod tests {
             !text.contains("MemTotal"),
             "non-matching field should be filtered out"
         );
+    }
+    /// A heading row, or a labelled value row when `value` is given.
+    fn row(depth: usize, label: &str, value: Option<&str>) -> Row {
+        Row {
+            depth,
+            label: label.to_string(),
+            value: value.map(|v| Value::Text(v.to_string())),
+            source: None,
+            is_group: value.is_none(),
+        }
+    }
+
+    /// A page of `sections` sections, each `fields` fields of `value` deep.
+    fn page(sections: usize, fields: usize, value: &str) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for s in 0..sections {
+            if s > 0 {
+                rows.push(row(0, "", None));
+                // A spacer is a blank row, not a group.
+                rows.last_mut().unwrap().is_group = false;
+            }
+            rows.push(row(0, &format!("Section {s}"), None));
+            for f in 0..fields {
+                rows.push(row(1, &format!("Field {f}"), Some(value)));
+            }
+        }
+        rows
+    }
+
+    fn width_of(line: &Line<'_>) -> usize {
+        line.spans.iter().map(|s| s.content.chars().count()).sum()
+    }
+
+    /// Lines of a page's real collected rows, in one column and as laid out.
+    fn both(id: &str, width: usize, viewport: usize) -> (usize, usize) {
+        let p = &Preset::Terminal.palette();
+        let mut app = App::new();
+        app.select_page_by_id(id);
+        app.page_mut().reload();
+        let rows = app::visible_rows(&app.page().rows, "");
+        (
+            flow_page(&rows, width, p).lines.len(),
+            columnise(&rows, width, viewport, MAX_COLUMNS, p).len(),
+        )
+    }
+
+    #[test]
+    fn a_page_that_overflows_is_split_into_columns() {
+        // The complaint this fixes: Memory Usage is 90 lines of 30-character
+        // rows, so in one column it scrolls while two thirds of the pane is
+        // blank.
+        let (single, columns) = both("memory", 139, 44);
+        assert!(single > 44, "memory should overflow a 44-line viewport");
+        assert!(
+            columns < single / 2,
+            "memory: {single} lines in one column, {columns} in several"
+        );
+    }
+
+    #[test]
+    fn a_page_that_already_fits_is_left_alone() {
+        // Columns exist to stop a page running off the bottom. Cutting up a
+        // page that already fits buys nothing and costs readability.
+        let p = &Preset::Terminal.palette();
+        let rows = page(3, 4, "value");
+        let rows: Vec<&Row> = rows.iter().collect();
+        let single = flow_page(&rows, 139, p).lines;
+        let laid_out = columnise(&rows, 139, 44, MAX_COLUMNS, p);
+        assert_eq!(single.len(), laid_out.len());
+    }
+
+    #[test]
+    fn long_values_keep_their_page_in_one_column() {
+        // Environment Variables and the CPU flag list are the real cases:
+        // narrow columns make them wrap, and wrapping makes them *taller*.
+        let p = &Preset::Terminal.palette();
+        let rows = page(4, 20, &"word ".repeat(40));
+        let rows: Vec<&Row> = rows.iter().collect();
+        let single = flow_page(&rows, 139, p).lines.len();
+        let laid_out = columnise(&rows, 139, 20, MAX_COLUMNS, p).len();
+        assert_eq!(
+            single, laid_out,
+            "a page of long values should stay in one column"
+        );
+    }
+
+    #[test]
+    fn a_narrow_terminal_gets_one_column() {
+        let p = &Preset::Terminal.palette();
+        let rows = page(6, 6, "42");
+        let rows: Vec<&Row> = rows.iter().collect();
+        let single = flow_page(&rows, 44, p).lines.len();
+        assert_eq!(single, columnise(&rows, 44, 10, MAX_COLUMNS, p).len());
+    }
+
+    #[test]
+    fn one_column_can_be_forced() {
+        let p = &Preset::Terminal.palette();
+        let rows = page(6, 6, "42");
+        let rows: Vec<&Row> = rows.iter().collect();
+        let single = flow_page(&rows, 139, p).lines.len();
+        assert_eq!(single, columnise(&rows, 139, 10, 1, p).len());
+        // And without the ceiling, this page would have been split.
+        assert!(columnise(&rows, 139, 10, 4, p).len() < single);
+    }
+
+    #[test]
+    fn no_column_bleeds_into_its_neighbour() {
+        // The invariant that keeps the layout from corrupting itself: columns
+        // are drawn as one line each, so an overlong line would overwrite the
+        // column to its right.
+        let p = &Preset::Terminal.palette();
+        let mut app = App::new();
+        for i in 0..app.pages.len() {
+            app.pages[i].reload();
+            let id = app.pages[i].id();
+            let rows = app::visible_rows(&app.pages[i].rows, "");
+            if rows.is_empty() {
+                continue;
+            }
+            for width in [40usize, 80, 139, 200] {
+                for viewport in [10usize, 44] {
+                    for line in columnise(&rows, width, viewport, MAX_COLUMNS, p) {
+                        assert!(
+                            width_of(&line) <= width,
+                            "{id} at {width}x{viewport}: a line is {} cells wide",
+                            width_of(&line)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_column_that_breaks_mid_section_repeats_the_heading() {
+        // /proc/meminfo is one 58-row section; split across columns, the
+        // second column would otherwise be an anonymous block of numbers.
+        let p = &Preset::Terminal.palette();
+        let rows = page(1, 120, "42");
+        let rows: Vec<&Row> = rows.iter().collect();
+        let lines = columnise(&rows, 139, 30, MAX_COLUMNS, p);
+        let text: String = lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.contains("Section 0 (cont.)"),
+            "a continued section should name itself"
+        );
+    }
+
+    #[test]
+    fn a_break_prefers_a_section_boundary() {
+        // Sections of equal size should break between sections, not inside
+        // them — no "(cont.)" should be needed at all.
+        let p = &Preset::Terminal.palette();
+        let rows = page(4, 14, "42");
+        let rows: Vec<&Row> = rows.iter().collect();
+        let lines = columnise(&rows, 139, 30, MAX_COLUMNS, p);
+        let text: String = lines.iter().map(|l| l.to_string()).collect();
+        assert!(!text.contains("(cont.)"), "{text}");
+        // Each section heading still appears exactly once.
+        for s in 0..4 {
+            assert_eq!(
+                text.matches(&format!("Section {s}")).count(),
+                1,
+                "Section {s} should appear once"
+            );
+        }
+    }
+
+    #[test]
+    fn clipping_a_line_marks_the_cut() {
+        // Silent truncation is the bug: "Intel Corp. Bluetooth wireless inter"
+        // reads as a device name, not as a cut-off one.
+        let line = Line::from(vec![Span::raw("abc"), Span::raw("defgh")]);
+        assert_eq!(clip(&line, 8).len(), 2, "an exact fit is not clipped");
+        let clipped: String = clip(&line, 6).iter().map(|s| s.content.clone()).collect();
+        assert_eq!(clipped, "abcde…");
+        // A span that fills the width exactly is still marked when more
+        // follows it.
+        let clipped: String = clip(&line, 3).iter().map(|s| s.content.clone()).collect();
+        assert_eq!(clipped, "ab…");
+        assert!(clip(&line, 0).is_empty());
+    }
+
+    #[test]
+    fn a_gauge_never_outgrows_its_column() {
+        // Gauges cannot wrap, so a column too narrow for one would cut the
+        // numbers off rather than reflow them.
+        for width in [8usize, 12, 20, 31, 60] {
+            let spans = gauge_spans(
+                62.5,
+                Some("7.74 GiB of 31.07 GiB"),
+                Polarity::HighIsBad,
+                width,
+                &Preset::Terminal.palette(),
+            );
+            let rendered: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            assert!(rendered <= width, "{rendered} cells drawn in {width}");
+        }
+    }
+
+    #[test]
+    fn a_bar_is_never_drawn_without_its_number() {
+        // Filesystems and Battery are the pages with gauges, and a gauge
+        // cannot wrap: if its column is too narrow the caption is what gets
+        // cut, leaving a bar with no figure beside it.
+        let p = &Preset::Terminal.palette();
+        let mut rows = Vec::new();
+        for s in 0..6 {
+            if s > 0 {
+                let mut spacer = row(0, "", None);
+                spacer.is_group = false;
+                rows.push(spacer);
+            }
+            rows.push(row(0, &format!("/dev/sd{s}"), None));
+            for f in 0..5 {
+                rows.push(Row {
+                    depth: 1,
+                    label: format!("Usage {f}"),
+                    value: Some(Value::Gauge {
+                        percent: 62.5,
+                        label: Some("7.74 GiB of 31.07 GiB".to_string()),
+                        polarity: Polarity::HighIsBad,
+                    }),
+                    source: None,
+                    is_group: false,
+                });
+            }
+        }
+        let rows: Vec<&Row> = rows.iter().collect();
+
+        for width in [40usize, 80, 139, 200] {
+            for line in columnise(&rows, width, 12, MAX_COLUMNS, p) {
+                let text = line.to_string();
+                if text.contains('█') || text.contains('░') {
+                    assert!(
+                        text.contains('%'),
+                        "at width {width}: a bar lost its number: {text:?}"
+                    );
+                }
+            }
+        }
     }
 }

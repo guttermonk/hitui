@@ -10,6 +10,8 @@ mod probe;
 mod sysfs;
 mod ui;
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Result, bail};
 use clap::Parser;
 use serde_json::{Map, Value as Json};
@@ -24,6 +26,15 @@ use crate::app::App;
     after_help = "With no arguments, hitui starts the interactive browser."
 )]
 struct Cli {
+    /// Read this config file instead of the one under $XDG_CONFIG_HOME.
+    ///
+    /// For checking a config before installing it — `--keys` and `--theme`
+    /// against an arbitrary file. A path given here must exist: falling back
+    /// to the defaults would answer a question about a different config than
+    /// the one asked about.
+    #[arg(short, long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     /// Print a JSON report to stdout instead of starting the browser
     #[arg(long)]
     json: bool,
@@ -61,13 +72,16 @@ fn main() -> Result<()> {
 
     // Loaded before anything draws, so a malformed config reports itself to a
     // normal terminal rather than to one already in raw mode.
-    let config = config::Config::load()?;
+    let config = match cli.config.as_deref() {
+        Some(path) => config::Config::from_file(path)?,
+        None => config::Config::load()?,
+    };
 
     if cli.keys {
-        return print_keys(&config);
+        return print_keys(&config, cli.config.as_deref());
     }
     if cli.theme {
-        return print_theme(&config);
+        return print_theme(&config, cli.config.as_deref());
     }
 
     if cli.list {
@@ -103,17 +117,9 @@ fn main() -> Result<()> {
 }
 
 /// Show what the config's keybinding layers actually resolved to.
-fn print_keys(config: &config::Config) -> Result<()> {
+fn print_keys(config: &config::Config, source: Option<&Path>) -> Result<()> {
     let maps = config.keymaps();
-
-    match config::Config::path() {
-        Some(path) if path.is_file() => println!("config: {}", path.display()),
-        Some(path) => println!(
-            "config: {} (not present — showing defaults)",
-            path.display()
-        ),
-        None => println!("config: no home directory — showing defaults"),
-    }
+    print_source(source);
 
     for (mode, keymap) in maps.iter() {
         println!("\n[{}]", mode.name());
@@ -144,37 +150,93 @@ fn print_keys(config: &config::Config) -> Result<()> {
     Ok(())
 }
 
+/// Where the config being reported on came from.
+fn print_source(source: Option<&Path>) {
+    match source {
+        Some(path) => println!("config: {}", path.display()),
+        None => match config::Config::path() {
+            Some(path) if path.is_file() => println!("config: {}", path.display()),
+            Some(path) => println!(
+                "config: {} (not present — showing defaults)",
+                path.display()
+            ),
+            None => println!("config: no home directory — showing defaults"),
+        },
+    }
+}
+
 /// Show the resolved palette, so an override can be checked without squinting
 /// at the terminal.
-fn print_theme(config: &config::Config) -> Result<()> {
+fn print_theme(config: &config::Config, source: Option<&Path>) -> Result<()> {
     let palette = config.palette()?;
+    print_source(source);
+    print_overlay(config);
     println!("preset: {:?}", config.theme.preset);
 
-    for (slot, colour) in [
-        ("fg", palette.fg),
-        ("bg", palette.bg),
-        ("dim", palette.dim),
-        ("border", palette.border),
-        ("border_focused", palette.border_focused),
-        ("heading", palette.heading),
-        ("accent", palette.accent),
-        ("cursor_fg", palette.cursor_fg),
-        ("cursor_bg", palette.cursor_bg),
-        ("status_fg", palette.status_fg),
-        ("status_bg", palette.status_bg),
-        ("gauge_track", palette.gauge_track),
-        ("ok", palette.ok),
-        ("warn", palette.warn),
-        ("danger", palette.danger),
+    let faint = palette.faint;
+    for (slot, colour, faint) in [
+        ("fg", palette.fg, false),
+        ("bg", palette.bg, false),
+        ("dim", palette.dim, faint.dim),
+        ("border", palette.border, faint.border),
+        ("border_focused", palette.border_focused, false),
+        ("heading", palette.heading, false),
+        ("accent", palette.accent, false),
+        ("cursor_fg", palette.cursor_fg, false),
+        ("cursor_bg", palette.cursor_bg, false),
+        ("status_fg", palette.status_fg, false),
+        ("status_bg", palette.status_bg, false),
+        ("gauge_track", palette.gauge_track, faint.gauge_track),
+        ("ok", palette.ok, false),
+        ("warn", palette.warn, false),
+        ("danger", palette.danger, false),
     ] {
-        let overridden = if config.theme.colors.contains_key(slot) {
+        // Which layer won, since three can set the same slot: the preset, the
+        // config's [theme.colors], and a colour overlay on top of that.
+        let from = if config
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.applied.iter().any(|key| key == slot))
+        {
+            "  (from the overlay)"
+        } else if config.theme.colors.contains_key(slot) {
             "  (overridden)"
         } else {
             ""
         };
-        println!("  {slot:<16} {}{overridden}", describe_colour(colour));
+        // A faint slot has no colour of its own, so printing only the colour
+        // would say "reset" and leave the reader wondering why it looks
+        // different from fg.
+        let attribute = if faint { " + dim attribute" } else { "" };
+        println!("  {slot:<16} {}{attribute}{from}", describe_colour(colour));
     }
     Ok(())
+}
+
+/// What the colour overlay contributed, and where it was looked for.
+///
+/// Reported even when there is none, because the first question about a
+/// generated overlay that is not taking effect is whether it is in the place
+/// hitui actually reads.
+fn print_overlay(config: &config::Config) {
+    match (&config.overlay, config::Config::overlay_path()) {
+        (Some(overlay), _) => {
+            println!("overlay: {}", overlay.path.display());
+            if !overlay.applied.is_empty() {
+                println!("  applied         {}", overlay.applied.join(", "));
+            }
+            // Named rather than silently dropped: a generated typo is
+            // permanent, and nothing else would ever mention it.
+            if !overlay.ignored.is_empty() {
+                println!(
+                    "  not colour slots, ignored: {}",
+                    overlay.ignored.join(", ")
+                );
+            }
+        }
+        (None, Some(path)) => println!("overlay: none at {}", path.display()),
+        (None, None) => println!("overlay: none (no cache directory)"),
+    }
 }
 
 fn describe_colour(colour: ratatui::style::Color) -> String {
@@ -208,4 +270,33 @@ fn print_json(filter: &[String], bench: bool) -> Result<()> {
     }
     println!("{}", serde_json::to_string_pretty(&Json::Object(report))?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The desktop entry names the binary and the icon, and both are strings
+    /// that can rot without anything failing to build. `nix flake check` runs
+    /// desktop-file-validate over the same file for the spec-level checks;
+    /// this is the part only the crate knows.
+    #[test]
+    fn the_desktop_entry_matches_the_binary() {
+        let entry =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/hitui.desktop"))
+                .expect("assets/hitui.desktop is present");
+
+        let value = |key: &str| -> Option<String> {
+            entry
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                .map(str::to_string)
+        };
+
+        assert_eq!(value("Exec").as_deref(), Some(env!("CARGO_PKG_NAME")));
+        assert_eq!(value("TryExec").as_deref(), Some(env!("CARGO_PKG_NAME")));
+        assert_eq!(value("Type").as_deref(), Some("Application"));
+        // A TUI launched without a terminal exits instantly, so this is the
+        // one key whose absence breaks the entry outright.
+        assert_eq!(value("Terminal").as_deref(), Some("true"));
+        assert!(value("Icon").is_some_and(|icon| !icon.is_empty()));
+    }
 }

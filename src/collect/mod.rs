@@ -26,6 +26,7 @@ pub mod edid;
 pub mod environment;
 pub mod filesystems;
 pub mod firmware;
+pub mod fwupd;
 pub mod gpu;
 pub mod input;
 pub mod interfaces;

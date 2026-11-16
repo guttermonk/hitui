@@ -24,13 +24,22 @@
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
 
+            # A terminal program still wants a menu entry. The icon is named
+            # rather than shipped: icon names resolve through whatever icon
+            # theme is in use, so this needs no hardinfo2 installed.
+            postInstall = ''
+              install -Dm644 assets/hitui.desktop \
+                $out/share/applications/hitui.desktop
+            '';
+
             meta = {
               description = "Terminal system information browser";
               mainProgram = "hitui";
               platforms = nixpkgs.lib.platforms.linux;
-              # TODO: pick a licence. This is a from-scratch reimplementation,
-              # not derived from hardinfo2's GPL-2.0 sources, so it is a free
-              # choice rather than an inherited obligation.
+              # A from-scratch reimplementation, not derived from hardinfo2's
+              # GPL-2.0 sources, so this was a free choice rather than an
+              # inherited obligation — chosen to match the sibling TUIs.
+              license = nixpkgs.lib.licenses.gpl3Plus;
             };
           };
         }
@@ -61,6 +70,16 @@
         system: pkgs: {
           # buildRustPackage runs `cargo test` in its check phase.
           build = self.packages.${system}.hitui;
+
+          # The desktop entry is parsed by other people's menu code, so it is
+          # validated here rather than discovered to be wrong at install time.
+          desktop =
+            pkgs.runCommand "hitui-desktop-check"
+              { nativeBuildInputs = [ pkgs.desktop-file-utils ]; }
+              ''
+                desktop-file-validate ${./assets/hitui.desktop}
+                touch $out
+              '';
 
           # Reuses the package's vendored dependencies, so this costs a lint
           # pass rather than a second fetch.
