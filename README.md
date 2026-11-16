@@ -7,7 +7,7 @@ Reads the kernel's own interfaces (`/proc`, `/sys`) rather than shelling out to
 other tools, renders them in a two-pane browser, and can dump the whole report
 as JSON for scripting.
 
-**Status:** complete. All four of hardinfo2's modules are implemented — 37
+**Status:** complete. All four of hardinfo2's modules are implemented — 38
 pages across Computer, Devices, Network and Benchmarks. Several go further than
 the original; see [Pages](#pages).
 
@@ -334,6 +334,14 @@ Where hitui goes further than hardinfo2:
   sysctls as "1 — hidden from unprivileged users"; TCP state `0A` as `LISTEN`.
 - **Security** covers hardening sysctls, lockdown, module signing and
   IOMMU/passthrough readiness, which hardinfo2 does not report.
+- **Repositories answer "verified how", not just "where from"**. A repository
+  is a list of things the machine will install as root, and the managers all
+  spell the check differently — `gpgcheck`, `gpg-verify`, `Signed-By`,
+  `SigLevel`, `require-sigs`. They are normalised to one row, so an APT source
+  carrying `trusted=yes` or a `.repo` with `gpgcheck=0` states it rather than
+  leaving a blank. Read from the managers' own files: asking a package manager
+  for a listing can send it to refresh metadata over the network, which opening
+  a page must not do.
 - **Bluetooth unpacks what BlueZ reports as numbers**: HCI version 8 as
   "Bluetooth 4.2", the class of device 7078156 as "Computer / Laptop" plus the
   services behind it, service UUIDs as profile names, and bluetoothd's own
@@ -346,7 +354,7 @@ Where hitui goes further than hardinfo2:
   behind", and it is how this machine's UEFI dbx turned out to be four
   revocation lists out of date. hardinfo2 reports the version and stops.
 
-Still planned beyond parity: package repositories, RAID/LVM volume topology.
+Still planned beyond parity: RAID/LVM volume topology.
 
 Two deliberate omissions:
 
@@ -374,6 +382,7 @@ the secret in a paste.
 - [x] **Filesystems** — `/proc/self/mounts`, `statvfs`
 - [x] **Display** — session type, compositor, active outputs, backlight
 - [x] **Environment Variables** — with credential-shaped values redacted
+- [x] **Repositories** — every configured package source, and how each is verified
 - [x] **Development** — toolchain versions, probing only what is installed
 - [x] **Users** / **Groups** — `/etc/passwd`, `/etc/group`, primary groups resolved
 

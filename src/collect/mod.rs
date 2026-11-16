@@ -41,6 +41,7 @@ pub mod netutil;
 pub mod os;
 pub mod pci;
 pub mod printers;
+pub mod repos;
 pub mod resources;
 pub mod routes;
 pub mod security;
@@ -130,6 +131,7 @@ pub fn registry() -> Vec<Box<dyn Collector>> {
         Box::new(modules::Modules),
         Box::new(boots::Boots),
         Box::new(development::Development),
+        Box::new(repos::Repositories),
         Box::new(security::Security),
         Box::new(locales::Locales),
         Box::new(environment::Environment),
