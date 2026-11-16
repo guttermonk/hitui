@@ -11,7 +11,7 @@ use ratatui::widgets::{
 };
 
 use crate::app::{self, App, Focus, Row, SidebarItem};
-use crate::model::Value;
+use crate::model::{Polarity, Value};
 use crate::sysfs;
 
 const SIDEBAR_WIDTH: u16 = 24;
@@ -241,9 +241,18 @@ fn build_lines(rows: &[&Row], width: usize) -> Vec<Line<'static>> {
         let label_span = Span::styled(format!("{key}{} ", " ".repeat(pad)), dim());
 
         match value {
-            Value::Gauge { percent, label } => {
+            Value::Gauge {
+                percent,
+                label,
+                polarity,
+            } => {
                 let mut spans = vec![label_span];
-                spans.extend(gauge_spans(*percent, label.as_deref(), value_width));
+                spans.extend(gauge_spans(
+                    *percent,
+                    label.as_deref(),
+                    *polarity,
+                    value_width,
+                ));
                 lines.push(Line::from(spans));
             }
             _ => {
@@ -264,9 +273,15 @@ fn build_lines(rows: &[&Row], width: usize) -> Vec<Line<'static>> {
 
 /// A bar, its percentage, and an optional caption spelling out the absolutes.
 ///
-/// Colour tracks severity so a nearly-full disk or a pegged CPU is visible
-/// without reading the number.
-fn gauge_spans(percent: f64, label: Option<&str>, width: usize) -> Vec<Span<'static>> {
+/// Colour tracks severity so a nearly-full disk or a worn-out SSD is visible
+/// without reading the number. Severity depends on which end is bad: 95 % disk
+/// used is alarming, 95 % battery remaining is not.
+fn gauge_spans(
+    percent: f64,
+    label: Option<&str>,
+    polarity: Polarity,
+    width: usize,
+) -> Vec<Span<'static>> {
     const MIN_BAR: usize = 8;
     const MAX_BAR: usize = 24;
 
@@ -282,9 +297,14 @@ fn gauge_spans(percent: f64, label: Option<&str>, width: usize) -> Vec<Span<'sta
         .clamp(MIN_BAR, MAX_BAR);
     let filled = (percent / 100.0 * bar_width as f64).round() as usize;
 
-    let style = Style::default().fg(if percent >= 90.0 {
+    // How far along the bad direction this reading sits.
+    let severity = match polarity {
+        Polarity::HighIsBad => percent,
+        Polarity::HighIsGood => 100.0 - percent,
+    };
+    let style = Style::default().fg(if severity >= 90.0 {
         Color::Red
-    } else if percent >= 70.0 {
+    } else if severity >= 70.0 {
         Color::Yellow
     } else {
         Color::Green
@@ -477,6 +497,48 @@ mod tests {
     #[test]
     fn hard_breaks_overlong_words() {
         assert_eq!(wrap("aaaaaaaa", 3), vec!["aaa", "aaa", "aa"]);
+    }
+
+    /// The colour of a gauge's filled portion.
+    fn gauge_colour(percent: f64, polarity: Polarity) -> Option<Color> {
+        gauge_spans(percent, None, polarity, 60)
+            .first()
+            .and_then(|span| span.style.fg)
+    }
+
+    #[test]
+    fn gauge_colour_follows_polarity() {
+        // Consumption: a full bar is the alarm.
+        assert_eq!(gauge_colour(5.0, Polarity::HighIsBad), Some(Color::Green));
+        assert_eq!(gauge_colour(75.0, Polarity::HighIsBad), Some(Color::Yellow));
+        assert_eq!(gauge_colour(95.0, Polarity::HighIsBad), Some(Color::Red));
+
+        // Reserves read the other way round. This is the bug being guarded:
+        // 100 % spare blocks and a full battery were being painted red.
+        assert_eq!(
+            gauge_colour(100.0, Polarity::HighIsGood),
+            Some(Color::Green)
+        );
+        assert_eq!(
+            gauge_colour(25.0, Polarity::HighIsGood),
+            Some(Color::Yellow)
+        );
+        assert_eq!(gauge_colour(5.0, Polarity::HighIsGood), Some(Color::Red));
+    }
+
+    #[test]
+    fn gauge_bar_never_overflows_its_column() {
+        // 0 % and 100 % are the off-by-one candidates.
+        for percent in [0.0, 0.4, 50.0, 99.6, 100.0] {
+            for polarity in [Polarity::HighIsBad, Polarity::HighIsGood] {
+                let spans = gauge_spans(percent, Some("caption"), polarity, 48);
+                let rendered: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                assert!(
+                    rendered <= 48,
+                    "{percent} % rendered {rendered} cells in 48"
+                );
+            }
+        }
     }
 
     /// Render a frame off-screen. Run with `--nocapture` to eyeball the layout.

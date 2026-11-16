@@ -113,11 +113,24 @@ pub enum Polarity {
 }
 
 impl Value {
-    /// A gauge with a caption.
+    /// A gauge measuring consumption, where a full bar is bad.
     pub fn gauge(percent: f64, label: impl Into<String>) -> Self {
         Value::Gauge {
             percent,
             label: Some(label.into()),
+            polarity: Polarity::HighIsBad,
+        }
+    }
+
+    /// A gauge measuring a reserve, where an empty bar is bad.
+    ///
+    /// Battery charge, SSD spare blocks, capacity against design — all read
+    /// the opposite way round from usage.
+    pub fn reserve_gauge(percent: f64, label: impl Into<String>) -> Self {
+        Value::Gauge {
+            percent,
+            label: Some(label.into()),
+            polarity: Polarity::HighIsGood,
         }
     }
 
@@ -193,10 +206,12 @@ impl fmt::Display for Value {
             Value::Gauge {
                 percent,
                 label: Some(label),
+                ..
             } => write!(f, "{percent:.1} % · {label}"),
             Value::Gauge {
                 percent,
                 label: None,
+                ..
             } => write!(f, "{percent:.1} %"),
         }
     }
@@ -277,7 +292,7 @@ mod tests {
 
     #[test]
     fn bytes_gauge_computes_its_own_percentage() {
-        let Value::Gauge { percent, label } = Value::bytes_gauge(512, 1024) else {
+        let Value::Gauge { percent, label, .. } = Value::bytes_gauge(512, 1024) else {
             panic!("expected a gauge");
         };
         assert_eq!(percent, 50.0);

@@ -17,7 +17,7 @@ use serde_json::Value as Json;
 
 use crate::collect::filesystems;
 use crate::collect::{Collector, Group};
-use crate::model::{Node, Value, format_bytes};
+use crate::model::{Node, Value, format_bytes, format_duration};
 use crate::probe;
 use crate::sysfs;
 
@@ -357,6 +357,20 @@ fn health(report: &Json) -> Node {
         "Temperature",
         number("/temperature/current").map(|c| format!("{c} °C")),
     );
+    // NVMe controllers often carry several sensors; the hottest is not always
+    // the one reported as "current".
+    if let Some(sensors) = report
+        .pointer("/nvme_smart_health_information_log/temperature_sensors")
+        .and_then(Json::as_array)
+        .filter(|sensors| sensors.len() > 1)
+    {
+        let readings: Vec<String> = sensors
+            .iter()
+            .filter_map(Json::as_u64)
+            .map(|c| format!("{c} °C"))
+            .collect();
+        node.push(Node::field("Sensors", readings.join(" · ")));
+    }
 
     // NVMe publishes a fixed health log; ATA exposes the same ideas as
     // numbered attributes, so each is read from where it actually lives.
@@ -380,10 +394,17 @@ fn health(report: &Json) -> Node {
             Value::gauge(used as f64, format!("{used} % of rated writes")),
         ));
     }
+    // Spare blocks are a reserve that depletes, so an empty bar is the alarm.
+    // The drive publishes the threshold it considers critical, which is better
+    // context than any figure hitui could pick.
     if let Some(spare) = number(&format!("{nvme}/available_spare")) {
+        let caption = match number(&format!("{nvme}/available_spare_threshold")) {
+            Some(threshold) => format!("{spare} % remaining, critical below {threshold} %"),
+            None => format!("{spare} % remaining"),
+        };
         node.push(Node::field(
             "Spare blocks",
-            Value::gauge(spare as f64, format!("{spare} % remaining")),
+            Value::reserve_gauge(spare as f64, caption),
         ));
     }
 
@@ -402,9 +423,31 @@ fn health(report: &Json) -> Node {
         ("Media errors", "media_errors"),
         ("Unsafe shutdowns", "unsafe_shutdowns"),
         ("Critical warnings", "critical_warning"),
+        ("Error log entries", "num_err_log_entries"),
     ] {
         node.push_opt(label, number(&format!("{nvme}/{field}")));
     }
+
+    // Time spent above the drive's own warning and critical thresholds, in
+    // minutes. Zero is the normal reading, so these only appear when the drive
+    // has actually been throttling — which is the whole point of showing them.
+    for (label, field) in [
+        ("Time over warning temp", "warning_temp_time"),
+        ("Time over critical temp", "critical_comp_time"),
+    ] {
+        node.push_opt(
+            label,
+            number(&format!("{nvme}/{field}"))
+                .filter(|minutes| *minutes > 0)
+                .map(|minutes| format_duration(minutes * 60)),
+        );
+    }
+    node.push_opt(
+        "Controller busy time",
+        number(&format!("{nvme}/controller_busy_time"))
+            .filter(|minutes| *minutes > 0)
+            .map(|minutes| format_duration(minutes * 60)),
+    );
 
     // Reallocated sectors are the classic early sign of a dying spinning disk.
     node.push_opt("Reallocated sectors", ata_attribute(report, 5));
@@ -433,6 +476,7 @@ fn ata_attribute(report: &Json, id: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Polarity;
 
     #[test]
     fn picks_the_bracketed_scheduler() {
@@ -452,41 +496,105 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reads_health_out_of_an_nvme_report() {
-        // Shaped exactly as `smartctl --json` emits for an NVMe drive.
-        let report: Json = serde_json::from_str(
-            r#"{
-                "device": {"protocol": "NVMe"},
-                "smart_status": {"passed": true},
-                "temperature": {"current": 38},
-                "nvme_smart_health_information_log": {
-                    "percentage_used": 2,
-                    "available_spare": 100,
-                    "power_on_hours": 4321,
-                    "power_cycles": 765,
-                    "media_errors": 0,
-                    "data_units_written": 1000
-                }
-            }"#,
-        )
-        .unwrap();
+    /// A real `smartctl --json -H -A -i` report, verbatim from a Samsung
+    /// MZVLB512HAJQ. Kept real so the field pointers are anchored to output
+    /// smartctl actually produces rather than to the schema as I read it.
+    const NVME_REPORT: &str = r#"{
+        "smart_status": {"passed": true, "nvme": {"value": 0}},
+        "temperature": {"current": 38},
+        "nvme_smart_health_information_log": {
+            "nsid": 1,
+            "critical_warning": 0,
+            "temperature": 38,
+            "available_spare": 100,
+            "available_spare_threshold": 10,
+            "percentage_used": 5,
+            "data_units_read": 32538942,
+            "data_units_written": 112259745,
+            "host_reads": 467754166,
+            "host_writes": 2966775494,
+            "controller_busy_time": 3558,
+            "power_cycles": 1744,
+            "power_on_hours": 8944,
+            "unsafe_shutdowns": 143,
+            "media_errors": 0,
+            "num_err_log_entries": 2760,
+            "warning_temp_time": 0,
+            "critical_comp_time": 0,
+            "temperature_sensors": [38, 57]
+        }
+    }"#;
 
-        let node = health(&report);
-        let field = |label: &str| {
+    fn field_of(node: &Node, label: &str) -> Option<String> {
+        node.children
+            .iter()
+            .find(|c| c.label == label)
+            .and_then(|c| c.value.clone())
+            .map(|v| v.to_string())
+    }
+
+    #[test]
+    fn reads_health_out_of_a_real_nvme_report() {
+        let node = health(&serde_json::from_str(NVME_REPORT).unwrap());
+        let field = |label: &str| field_of(&node, label);
+
+        assert_eq!(field("SMART status").unwrap(), "passed");
+        assert_eq!(field("Temperature").unwrap(), "38 °C");
+        assert_eq!(field("Power-on hours").unwrap(), "8944");
+        assert_eq!(field("Power cycles").unwrap(), "1744");
+        assert_eq!(field("Unsafe shutdowns").unwrap(), "143");
+        assert_eq!(field("Error log entries").unwrap(), "2760");
+        assert!(field("Endurance used").unwrap().contains("5 %"));
+
+        // The drive's own critical threshold is better context than a guess.
+        let spare = field("Spare blocks").unwrap();
+        assert!(spare.contains("100 % remaining"), "{spare}");
+        assert!(spare.contains("critical below 10 %"), "{spare}");
+
+        // Both controller sensors, since "current" reports only the first.
+        assert_eq!(field("Sensors").unwrap(), "38 °C · 57 °C");
+
+        // NVMe data units are thousands of 512-byte blocks, so one unit is
+        // 512 KB: 112259745 units is ~52 TiB.
+        assert_eq!(field("Data written").unwrap(), "52.28 TiB");
+        assert_eq!(field("Data read").unwrap(), "15.15 TiB");
+
+        // Zero thermal-throttle time is the normal case and would be noise.
+        assert!(field("Time over warning temp").is_none());
+        assert!(field("Time over critical temp").is_none());
+        assert_eq!(field("Controller busy time").unwrap(), "2 days, 11 hours");
+    }
+
+    #[test]
+    fn reserves_and_consumption_are_coloured_oppositely() {
+        // The bug this guards: 100 % spare blocks is perfect health, but a
+        // gauge that assumes high-is-bad painted it red, as it did a fully
+        // charged battery.
+        let node = health(&serde_json::from_str(NVME_REPORT).unwrap());
+        let polarity = |label: &str| {
             node.children
                 .iter()
                 .find(|c| c.label == label)
                 .and_then(|c| c.value.clone())
-                .map(|v| v.to_string())
+                .and_then(|v| match v {
+                    Value::Gauge { polarity, .. } => Some(polarity),
+                    _ => None,
+                })
         };
 
-        assert_eq!(field("SMART status").unwrap(), "passed");
-        assert_eq!(field("Temperature").unwrap(), "38 °C");
-        assert_eq!(field("Power-on hours").unwrap(), "4321");
-        assert!(field("Endurance used").unwrap().contains("2 %"));
-        // 1000 units of 512 KB.
-        assert_eq!(field("Data written").unwrap(), "488.28 MiB");
+        assert_eq!(polarity("Spare blocks"), Some(Polarity::HighIsGood));
+        assert_eq!(polarity("Endurance used"), Some(Polarity::HighIsBad));
+    }
+
+    #[test]
+    fn thermal_throttling_is_reported_when_it_happened() {
+        // Same drive, but having spent time above its warning threshold.
+        let hot = NVME_REPORT.replace("\"warning_temp_time\": 0", "\"warning_temp_time\": 90");
+        let node = health(&serde_json::from_str(&hot).unwrap());
+        assert_eq!(
+            field_of(&node, "Time over warning temp").unwrap(),
+            "1 hour, 30 minutes"
+        );
     }
 
     #[test]

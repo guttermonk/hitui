@@ -61,9 +61,10 @@ fn battery_fields(supply: &Path, node: &mut Node) {
     node.push_opt("Status", sysfs::read(supply.join("status")));
 
     if let Some(percent) = charge_percent(supply) {
+        // A reserve, not a consumption: a full battery is good news.
         node.push(Node::field(
             "Charge",
-            Value::gauge(percent, format!("{percent:.0} %")),
+            Value::reserve_gauge(percent, format!("{percent:.0} %")),
         ));
     }
 
@@ -81,7 +82,7 @@ fn battery_fields(supply: &Path, node: &mut Node) {
         let health = full as f64 / design as f64 * 100.0;
         node.push(Node::field(
             "Health",
-            Value::gauge(health, format!("{health:.0} % of design capacity")),
+            Value::reserve_gauge(health, format!("{health:.0} % of design capacity")),
         ));
     }
     let quantity = |raw: u64| format!("{:.1} {unit}", raw as f64 / scale);

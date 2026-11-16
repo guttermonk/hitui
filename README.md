@@ -66,11 +66,17 @@ impl Collector for Battery {
 Register it in `collect::registry()` and it appears in the sidebar, the JSON
 report, `--list`, and the digit shortcuts with no UI changes.
 
-Values are typed (`Bytes`, `Hertz`, `Percent`, `Celsius`, …) rather than
+Values are typed (`Bytes`, `Hertz`, `Percent`, `Gauge`, …) rather than
 pre-formatted, so the JSON stays machine-readable and unit formatting is purely
 a display concern. Missing data is modelled as missing — `Node::push_opt` drops
 a field rather than printing "unknown", since which `/sys` files exist varies by
 kernel config, hardware, and privilege.
+
+Gauges carry a `Polarity`, because a percentage alone cannot be coloured: 95 %
+disk used and 95 % battery remaining are the same number meaning opposite
+things. `Value::gauge` measures consumption (disk used, SSD endurance spent) and
+reddens as it fills; `Value::reserve_gauge` measures a reserve (battery charge,
+SSD spare blocks, capacity against design) and reddens as it empties.
 
 | File | Role |
 | --- | --- |
