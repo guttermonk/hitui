@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # This repository merges topic branches rather than opening PRs, so the two
+  # triggers above only fire once the work has already landed. Dispatch is how
+  # a branch gets checked before that.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  # `nix flake check` is this project's gate: it builds, runs the whole test
+  # suite, lints with `clippy -D warnings`, and validates the desktop entry
+  # against desktop-file-validate. Running the same command here is what keeps
+  # CI and a local check from disagreeing about what "green" means.
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Flake check
+        run: nix flake check --print-build-logs
+      # The package output specifically, since that is what `nix run` and the
+      # NixOS config install.
+      - name: Build
+        run: nix build --print-build-logs
+
+  # Not covered by the flake check: the flake's formatter output is nixfmt,
+  # which has nothing to say about Rust.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  # A plain cargo build, with none of the flake's arrangements, because that
+  # is what anyone cloning the repo runs first.
+  #
+  # It also runs the suite on a second machine shape. This is a program that
+  # reads /proc, /sys and the hardware behind them, and its collectors are
+  # written to degrade rather than fail when something is absent — the Nix
+  # sandbox already caught two tests that quietly assumed a routing table.
+  # A runner is a different shape again, so the duplicate run earns its place.
+  cargo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --all-targets
