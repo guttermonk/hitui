@@ -411,6 +411,27 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    // A page with an action advertises it ahead of the generic bindings:
+    // nothing else on screen says that Enter does anything.
+    if let Some(action) = app.page().action() {
+        let mut spans = vec![
+            Span::raw(" "),
+            Span::styled("Enter", accent().add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {action}   "), dim()),
+        ];
+        for (key, label) in [
+            ("j/k", "scroll"),
+            ("h", "pages"),
+            ("?", "help"),
+            ("q", "quit"),
+        ] {
+            spans.push(Span::styled(key, accent().add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(format!(" {label}   "), dim()));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+
     let keys: &[(&str, &str)] = match app.focus {
         Focus::Sidebar => &[
             ("j/k", "page"),
@@ -446,6 +467,7 @@ fn draw_help(frame: &mut Frame) {
         ("Tab", "toggle pane focus"),
         ("1 – 9", "jump to page"),
         ("/", "filter fields on this page"),
+        ("Enter", "run this page's action, if it has one"),
         ("g / G, Home / End", "top / bottom"),
         ("PgUp / PgDn", "scroll a screen"),
         ("r", "re-collect this page"),

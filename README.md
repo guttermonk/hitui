@@ -7,10 +7,9 @@ Reads the kernel's own interfaces (`/proc`, `/sys`) rather than shelling out to
 other tools, renders them in a two-pane browser, and can dump the whole report
 as JSON for scripting.
 
-**Status:** feature-complete for information pages. All 35 of hardinfo2's
-Computer, Devices and Network pages are implemented; **Benchmarks** is the one
-remaining group. Several pages go further than the original — see
-[Pages](#pages).
+**Status:** complete. All four of hardinfo2's modules are implemented — 36
+pages across Computer, Devices, Network and Benchmarks. Several go further than
+the original; see [Pages](#pages).
 
 ## Build and run
 
@@ -20,6 +19,7 @@ cargo run -- --list    # available pages
 cargo run -- --json    # whole report as JSON
 cargo run -- --json cpu
 cargo run -- cpu       # open the browser on a specific page
+cargo run -- --json --bench   # include a benchmark run in the report
 ```
 
 With Nix:
@@ -39,6 +39,7 @@ nix flake check        # builds, runs the test suite, and lints with clippy -D w
 | `Tab` | toggle pane focus |
 | `1`–`9` | jump straight to a page |
 | `/` | filter fields on the current page |
+| `Enter` | run the current page's action, where it has one (Benchmarks) |
 | `Esc` | clear the filter, or quit |
 | `g` / `G`, `Home` / `End` | top / bottom |
 | `PgUp` / `PgDn` | scroll a screen |
@@ -217,15 +218,17 @@ the secret in a paste.
 
 ### Benchmarks
 
-hardinfo2's suite is Blowfish, Zlib, CryptoHash, Fibonacci, N-Queens, FPU FFT,
-raytracing, GPU drawing, and storage throughput, each in single- and
-multi-threaded variants, with results compared against a shared database.
+Nothing runs until you ask. Open the page and press Enter, or use
+`hitui --json --bench` for a scripted run. Results are in real physical units
+rather than scores, best of three passes each, and the suite takes about
+eighteen seconds.
 
-- [ ] Benchmark runner and result storage
-- [ ] CPU benchmarks (Blowfish, Zlib, CryptoHash, Fibonacci, N-Queens)
-- [ ] FPU benchmarks (FFT, raytracing)
-- [ ] Memory and storage throughput
-- [ ] Reference-result comparison
+- [x] **Processor** — Blowfish and SHA-256 (single thread and all cores), Zlib round trip, recursive Fibonacci, N-Queens
+- [x] **Floating point** — radix-2 FFT in MFLOP/s, sphere raytracing
+- [x] **Memory** — copy bandwidth, and latency at each level of the cache hierarchy
+- [x] **Storage** — sequential write with fsync
+- [ ] GPU throughput — needs a graphics context a terminal cannot create
+- [ ] Shared result comparison — would mean uploading your hardware profile to a third party
 
 ## Deviations
 

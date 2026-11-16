@@ -107,6 +107,11 @@ impl Page {
         self.collector.refresh_interval().is_some()
     }
 
+    /// Label for this page's Enter action, if it has one.
+    pub fn action(&self) -> Option<&'static str> {
+        self.collector.action()
+    }
+
     /// Re-run the collector, preserving the scroll position.
     pub fn reload(&mut self) {
         match self.collector.collect() {
@@ -366,6 +371,17 @@ impl App {
             }
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('r') => self.page_mut().reload(),
+            // Only pages that advertise an action respond to Enter, so it
+            // cannot start work on a page the user merely scrolled onto.
+            KeyCode::Enter => {
+                let page = self.page_mut();
+                if page.collector.action().is_some() {
+                    page.collector.activate();
+                    // Re-collect immediately so the page reflects the start
+                    // rather than waiting for the next tick.
+                    page.reload();
+                }
+            }
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Detail,

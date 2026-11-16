@@ -13,6 +13,7 @@ use crate::model::Node;
 
 pub mod accounts;
 pub mod battery;
+pub mod benchmarks;
 pub mod boots;
 pub mod connections;
 pub mod cpu;
@@ -101,6 +102,19 @@ pub trait Collector {
     fn refresh_interval(&self) -> Option<Duration> {
         None
     }
+
+    /// Label for an action the user can trigger with Enter, if this page has
+    /// one. `None` — the default — means the page only reads.
+    ///
+    /// Exists for Benchmarks, which is the one page that *does* something
+    /// rather than reporting something, and must never do it unasked.
+    fn action(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Perform that action. Must return promptly: anything long-running
+    /// belongs on a worker thread, or the interface stops redrawing.
+    fn activate(&mut self) {}
 }
 
 /// Every collector. Sidebar order is by [`Group::ALL`], then by registration
@@ -142,6 +156,7 @@ pub fn registry() -> Vec<Box<dyn Collector>> {
         Box::new(dns::Dns),
         Box::new(netstat::NetStat),
         Box::new(shares::Shares),
+        Box::new(benchmarks::Benchmarks::default()),
     ];
     collectors.sort_by_key(|c| Group::ALL.iter().position(|g| *g == c.group()));
     collectors
