@@ -1,0 +1,552 @@
+//! Colour themes.
+//!
+//! `preset = "terminal"` is the default and uses [`Color::Reset`] plus the
+//! ANSI names, so hitui inherits whatever palette the terminal already has —
+//! including a transparent background. The named presets are for when you want
+//! hitui to look the same everywhere regardless of the terminal.
+//!
+//! Any individual colour can be overridden on top of a preset:
+//!
+//! ```toml
+//! [theme]
+//! preset = "gruvbox-dark"
+//!
+//! [theme.colors]
+//! border_focused = "#fabd2f"
+//! ```
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+use ratatui::style::Color;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// The `[theme]` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Theme {
+    pub preset: Preset,
+    /// Per-slot overrides applied over the preset.
+    pub colors: BTreeMap<String, ColorSpec>,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            preset: Preset::Terminal,
+            colors: BTreeMap::new(),
+        }
+    }
+}
+
+impl Theme {
+    /// The resolved palette: the preset, with `[theme.colors]` applied.
+    pub fn palette(&self) -> Result<Palette, UnknownColorSlot> {
+        let mut palette = self.preset.palette();
+        for (slot, spec) in &self.colors {
+            palette.set(slot, spec.0)?;
+        }
+        Ok(palette)
+    }
+}
+
+/// A built-in palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Preset {
+    /// Follow the terminal's own colours.
+    #[default]
+    Terminal,
+    CatppuccinMocha,
+    CatppuccinLatte,
+    GruvboxDark,
+    Nord,
+    Dracula,
+    OneDark,
+    SolarizedDark,
+}
+
+/// Every colour the interface uses.
+///
+/// A flat struct rather than a map, so a slot nobody set is a compile error
+/// rather than a black-on-black surprise at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    pub fg: Color,
+    pub bg: Color,
+    /// Secondary text: field labels, the provenance tag, help hints.
+    pub dim: Color,
+
+    pub border: Color,
+    pub border_focused: Color,
+
+    /// Section headings in the detail pane and group headings in the sidebar.
+    pub heading: Color,
+    /// General emphasis: key names in the footer, the title.
+    pub accent: Color,
+
+    /// The selected sidebar row.
+    pub cursor_fg: Color,
+    pub cursor_bg: Color,
+
+    pub status_fg: Color,
+    pub status_bg: Color,
+
+    /// The unfilled part of a gauge bar.
+    pub gauge_track: Color,
+    /// Gauge severity, and the error marker beside a page that failed.
+    pub ok: Color,
+    pub warn: Color,
+    pub danger: Color,
+}
+
+impl Palette {
+    /// Slot names accepted in `[theme.colors]`, for error messages and docs.
+    ///
+    /// One entry per field. A test asserts every name here is settable, so a
+    /// field added without a matching arm in [`Palette::set`] is caught.
+    pub const SLOTS: [&'static str; 15] = [
+        "fg",
+        "bg",
+        "dim",
+        "border",
+        "border_focused",
+        "heading",
+        "accent",
+        "cursor_fg",
+        "cursor_bg",
+        "status_fg",
+        "status_bg",
+        "gauge_track",
+        "ok",
+        "warn",
+        "danger",
+    ];
+
+    fn set(&mut self, slot: &str, color: Color) -> Result<(), UnknownColorSlot> {
+        let target = match slot {
+            "fg" => &mut self.fg,
+            "bg" => &mut self.bg,
+            "dim" => &mut self.dim,
+            "border" => &mut self.border,
+            "border_focused" => &mut self.border_focused,
+            "heading" => &mut self.heading,
+            "accent" => &mut self.accent,
+            "cursor_fg" => &mut self.cursor_fg,
+            "cursor_bg" => &mut self.cursor_bg,
+            "status_fg" => &mut self.status_fg,
+            "status_bg" => &mut self.status_bg,
+            "gauge_track" => &mut self.gauge_track,
+            "ok" => &mut self.ok,
+            "warn" => &mut self.warn,
+            "danger" => &mut self.danger,
+            other => return Err(UnknownColorSlot(other.to_owned())),
+        };
+        *target = color;
+        Ok(())
+    }
+}
+
+/// A `[theme.colors]` key that is not a real colour slot.
+#[derive(Debug, Clone)]
+pub struct UnknownColorSlot(pub String);
+
+impl fmt::Display for UnknownColorSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Built from SLOTS rather than written out, so the message cannot
+        // drift away from the slots that actually exist.
+        write!(
+            f,
+            "unknown theme colour {:?} (expected one of: {})",
+            self.0,
+            Palette::SLOTS.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for UnknownColorSlot {}
+
+impl Preset {
+    pub fn palette(self) -> Palette {
+        match self {
+            // Reset means "whatever the terminal already uses", which is what
+            // keeps a transparent background transparent.
+            Preset::Terminal => Palette {
+                fg: Color::Reset,
+                bg: Color::Reset,
+                dim: Color::DarkGray,
+                border: Color::DarkGray,
+                border_focused: Color::Cyan,
+                heading: Color::Cyan,
+                accent: Color::Cyan,
+                cursor_fg: Color::Black,
+                cursor_bg: Color::Cyan,
+                status_fg: Color::Reset,
+                status_bg: Color::Reset,
+                gauge_track: Color::DarkGray,
+                ok: Color::Green,
+                warn: Color::Yellow,
+                danger: Color::Red,
+            },
+            Preset::CatppuccinMocha => Palette {
+                fg: rgb(0xcdd6f4),
+                bg: rgb(0x1e1e2e),
+                dim: rgb(0x6c7086),
+                border: rgb(0x45475a),
+                border_focused: rgb(0x89b4fa),
+                heading: rgb(0x89b4fa),
+                accent: rgb(0xcba6f7),
+                cursor_fg: rgb(0x1e1e2e),
+                cursor_bg: rgb(0x89b4fa),
+                status_fg: rgb(0xcdd6f4),
+                status_bg: rgb(0x313244),
+                gauge_track: rgb(0x45475a),
+                ok: rgb(0xa6e3a1),
+                warn: rgb(0xf9e2af),
+                danger: rgb(0xf38ba8),
+            },
+            Preset::CatppuccinLatte => Palette {
+                fg: rgb(0x4c4f69),
+                bg: rgb(0xeff1f5),
+                dim: rgb(0x8c8fa1),
+                border: rgb(0xbcc0cc),
+                border_focused: rgb(0x1e66f5),
+                heading: rgb(0x1e66f5),
+                accent: rgb(0x8839ef),
+                cursor_fg: rgb(0xeff1f5),
+                cursor_bg: rgb(0x1e66f5),
+                status_fg: rgb(0x4c4f69),
+                status_bg: rgb(0xccd0da),
+                gauge_track: rgb(0xbcc0cc),
+                ok: rgb(0x40a02b),
+                warn: rgb(0xdf8e1d),
+                danger: rgb(0xd20f39),
+            },
+            Preset::GruvboxDark => Palette {
+                fg: rgb(0xebdbb2),
+                bg: rgb(0x282828),
+                dim: rgb(0x928374),
+                border: rgb(0x504945),
+                border_focused: rgb(0xfabd2f),
+                heading: rgb(0x8ec07c),
+                accent: rgb(0xfabd2f),
+                cursor_fg: rgb(0x282828),
+                cursor_bg: rgb(0xfabd2f),
+                status_fg: rgb(0xebdbb2),
+                status_bg: rgb(0x3c3836),
+                gauge_track: rgb(0x504945),
+                ok: rgb(0xb8bb26),
+                warn: rgb(0xfabd2f),
+                danger: rgb(0xfb4934),
+            },
+            Preset::Nord => Palette {
+                fg: rgb(0xd8dee9),
+                bg: rgb(0x2e3440),
+                dim: rgb(0x616e88),
+                border: rgb(0x4c566a),
+                border_focused: rgb(0x88c0d0),
+                heading: rgb(0x88c0d0),
+                accent: rgb(0x81a1c1),
+                cursor_fg: rgb(0x2e3440),
+                cursor_bg: rgb(0x88c0d0),
+                status_fg: rgb(0xd8dee9),
+                status_bg: rgb(0x3b4252),
+                gauge_track: rgb(0x4c566a),
+                ok: rgb(0xa3be8c),
+                warn: rgb(0xebcb8b),
+                danger: rgb(0xbf616a),
+            },
+            Preset::Dracula => Palette {
+                fg: rgb(0xf8f8f2),
+                bg: rgb(0x282a36),
+                dim: rgb(0x6272a4),
+                border: rgb(0x44475a),
+                border_focused: rgb(0x8be9fd),
+                heading: rgb(0x8be9fd),
+                accent: rgb(0xbd93f9),
+                cursor_fg: rgb(0x282a36),
+                cursor_bg: rgb(0x8be9fd),
+                status_fg: rgb(0xf8f8f2),
+                status_bg: rgb(0x44475a),
+                gauge_track: rgb(0x44475a),
+                ok: rgb(0x50fa7b),
+                warn: rgb(0xf1fa8c),
+                danger: rgb(0xff5555),
+            },
+            Preset::OneDark => Palette {
+                fg: rgb(0xabb2bf),
+                bg: rgb(0x282c34),
+                dim: rgb(0x5c6370),
+                border: rgb(0x3e4451),
+                border_focused: rgb(0x61afef),
+                heading: rgb(0x61afef),
+                accent: rgb(0xc678dd),
+                cursor_fg: rgb(0x282c34),
+                cursor_bg: rgb(0x61afef),
+                status_fg: rgb(0xabb2bf),
+                status_bg: rgb(0x2c323c),
+                gauge_track: rgb(0x3e4451),
+                ok: rgb(0x98c379),
+                warn: rgb(0xe5c07b),
+                danger: rgb(0xe06c75),
+            },
+            Preset::SolarizedDark => Palette {
+                fg: rgb(0x839496),
+                bg: rgb(0x002b36),
+                dim: rgb(0x586e75),
+                border: rgb(0x073642),
+                border_focused: rgb(0x268bd2),
+                heading: rgb(0x268bd2),
+                accent: rgb(0x6c71c4),
+                cursor_fg: rgb(0x002b36),
+                cursor_bg: rgb(0x268bd2),
+                status_fg: rgb(0x839496),
+                status_bg: rgb(0x073642),
+                gauge_track: rgb(0x073642),
+                ok: rgb(0x859900),
+                warn: rgb(0xb58900),
+                danger: rgb(0xdc322f),
+            },
+        }
+    }
+}
+
+fn rgb(packed: u32) -> Color {
+    Color::Rgb(
+        ((packed >> 16) & 0xff) as u8,
+        ((packed >> 8) & 0xff) as u8,
+        (packed & 0xff) as u8,
+    )
+}
+
+/// A colour as written in the config: a hex triplet or an ANSI name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorSpec(pub Color);
+
+impl<'de> Deserialize<'de> for ColorSpec {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        parse_color(&text).map(ColorSpec).map_err(|_| {
+            serde::de::Error::custom(format!(
+                "invalid colour {text:?} (expected a hex triplet like \"#89b4fa\" or an ANSI \
+                 name like \"bright-blue\")"
+            ))
+        })
+    }
+}
+
+impl Serialize for ColorSpec {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let text = match self.0 {
+            Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+            Color::Reset => "reset".into(),
+            other => format!("{other:?}").to_lowercase(),
+        };
+        serializer.serialize_str(&text)
+    }
+}
+
+/// An unrecognised colour string.
+#[derive(Debug)]
+pub struct InvalidColor;
+
+/// Parse `#rrggbb`, `0xrrggbb`, or an ANSI colour name.
+pub fn parse_color(text: &str) -> Result<Color, InvalidColor> {
+    let trimmed = text.trim();
+
+    // Hex, in either of the two spellings people actually write.
+    let hex = trimmed
+        .strip_prefix('#')
+        .or_else(|| trimmed.strip_prefix("0x"))
+        .or_else(|| trimmed.strip_prefix("0X"));
+    if let Some(hex) = hex {
+        if hex.len() != 6 {
+            return Err(InvalidColor);
+        }
+        let packed = u32::from_str_radix(hex, 16).map_err(|_| InvalidColor)?;
+        return Ok(rgb(packed));
+    }
+
+    Ok(match trimmed.to_ascii_lowercase().as_str() {
+        "reset" | "default" => Color::Reset,
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "gray" | "grey" | "white" => Color::Gray,
+        "dark-gray" | "dark-grey" => Color::DarkGray,
+        "bright-red" => Color::LightRed,
+        "bright-green" => Color::LightGreen,
+        "bright-yellow" => Color::LightYellow,
+        "bright-blue" => Color::LightBlue,
+        "bright-magenta" => Color::LightMagenta,
+        "bright-cyan" => Color::LightCyan,
+        "bright-white" => Color::White,
+        _ => return Err(InvalidColor),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_is_accepted_in_both_spellings() {
+        assert_eq!(
+            parse_color("#89b4fa").unwrap(),
+            Color::Rgb(0x89, 0xb4, 0xfa)
+        );
+        assert_eq!(
+            parse_color("0x89b4fa").unwrap(),
+            Color::Rgb(0x89, 0xb4, 0xfa)
+        );
+        // Case and surrounding space should not matter.
+        assert_eq!(
+            parse_color(" #89B4FA ").unwrap(),
+            Color::Rgb(0x89, 0xb4, 0xfa)
+        );
+    }
+
+    #[test]
+    fn ansi_names_are_accepted() {
+        assert_eq!(parse_color("cyan").unwrap(), Color::Cyan);
+        assert_eq!(parse_color("dark-grey").unwrap(), Color::DarkGray);
+        assert_eq!(parse_color("bright-blue").unwrap(), Color::LightBlue);
+        assert_eq!(parse_color("reset").unwrap(), Color::Reset);
+    }
+
+    #[test]
+    fn malformed_colours_are_rejected_not_guessed() {
+        // Silently falling back to a default would give a theme that is wrong
+        // in a way nobody can see in the config.
+        assert!(parse_color("#89b4f").is_err(), "five digits");
+        assert!(parse_color("#89b4faa").is_err(), "seven digits");
+        assert!(parse_color("#zzzzzz").is_err());
+        assert!(parse_color("puce").is_err());
+        assert!(parse_color("").is_err());
+    }
+
+    #[test]
+    fn the_terminal_preset_leaves_the_background_alone() {
+        // The reason this is the default: a themed or transparent terminal
+        // keeps its appearance instead of being painted over.
+        let palette = Preset::Terminal.palette();
+        assert_eq!(palette.bg, Color::Reset);
+        assert_eq!(palette.fg, Color::Reset);
+    }
+
+    #[test]
+    fn named_presets_set_every_slot_explicitly() {
+        // A preset that left a slot as Reset would inherit a terminal colour
+        // the rest of the palette was not designed against.
+        for preset in [
+            Preset::CatppuccinMocha,
+            Preset::CatppuccinLatte,
+            Preset::GruvboxDark,
+            Preset::Nord,
+            Preset::Dracula,
+            Preset::OneDark,
+            Preset::SolarizedDark,
+        ] {
+            let palette = preset.palette();
+            for (name, colour) in [
+                ("fg", palette.fg),
+                ("bg", palette.bg),
+                ("dim", palette.dim),
+                ("border", palette.border),
+                ("border_focused", palette.border_focused),
+                ("heading", palette.heading),
+                ("accent", palette.accent),
+                ("cursor_fg", palette.cursor_fg),
+                ("cursor_bg", palette.cursor_bg),
+                ("status_fg", palette.status_fg),
+                ("status_bg", palette.status_bg),
+                ("gauge_track", palette.gauge_track),
+                ("ok", palette.ok),
+                ("warn", palette.warn),
+                ("danger", palette.danger),
+            ] {
+                assert!(
+                    matches!(colour, Color::Rgb(..)),
+                    "{preset:?} leaves {name} unset"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overrides_apply_on_top_of_a_preset() {
+        let theme: Theme = toml::from_str(
+            r##"
+            preset = "nord"
+            [colors]
+            border_focused = "#fabd2f"
+            danger = "bright-red"
+            "##,
+        )
+        .expect("valid theme");
+
+        let palette = theme.palette().expect("known slots");
+        assert_eq!(palette.border_focused, Color::Rgb(0xfa, 0xbd, 0x2f));
+        assert_eq!(palette.danger, Color::LightRed);
+        // Untouched slots keep the preset's value.
+        assert_eq!(palette.ok, Preset::Nord.palette().ok);
+    }
+
+    #[test]
+    fn an_unknown_slot_names_itself_and_the_alternatives() {
+        let theme: Theme = toml::from_str(
+            r##"
+            [colors]
+            bordr_focused = "#fabd2f"
+            "##,
+        )
+        .expect("parses; the slot name is checked when resolving");
+
+        let error = theme.palette().expect_err("unknown slot");
+        let message = error.to_string();
+        assert!(message.contains("bordr_focused"), "{message}");
+        assert!(message.contains("border_focused"), "{message}");
+    }
+
+    #[test]
+    fn every_palette_field_has_a_settable_slot() {
+        // Guards the pairing between the struct and `set`: a field added
+        // without a match arm would be invisible to `[theme.colors]`.
+        let mut palette = Preset::Nord.palette();
+        let marker = Color::Rgb(1, 2, 3);
+
+        for slot in Palette::SLOTS {
+            palette
+                .set(slot, marker)
+                .unwrap_or_else(|e| panic!("{slot} is listed but not settable: {e}"));
+        }
+
+        // Setting every listed slot must leave nothing at its preset value —
+        // which only holds if SLOTS covers the whole struct.
+        let untouched = Preset::Nord.palette();
+        assert_ne!(palette, untouched);
+        for colour in [
+            palette.fg,
+            palette.bg,
+            palette.dim,
+            palette.border,
+            palette.border_focused,
+            palette.heading,
+            palette.accent,
+            palette.cursor_fg,
+            palette.cursor_bg,
+            palette.status_fg,
+            palette.status_bg,
+            palette.gauge_track,
+            palette.ok,
+            palette.warn,
+            palette.danger,
+        ] {
+            assert_eq!(colour, marker, "a field is missing from SLOTS");
+        }
+    }
+}

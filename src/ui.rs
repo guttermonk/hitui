@@ -3,7 +3,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
@@ -11,6 +11,8 @@ use ratatui::widgets::{
 };
 
 use crate::app::{self, App, Focus, Row, SidebarItem};
+use crate::config::theme::Palette;
+use crate::keys::{Action, Keymaps, Mode};
 use crate::model::{Polarity, Value};
 use crate::sysfs;
 
@@ -20,12 +22,20 @@ const SIDEBAR_WIDTH: u16 = 28;
 /// Clamp for the label column so a single long key cannot squeeze out values.
 const MAX_LABEL_WIDTH: usize = 38;
 
-fn accent() -> Style {
-    Style::default().fg(Color::Cyan)
+/// The palette in force for this frame.
+///
+/// Threaded through rather than read from a global, so a test can render a
+/// frame under any theme.
+fn accent(p: &Palette) -> Style {
+    Style::default().fg(p.accent)
 }
 
-fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+fn dim(p: &Palette) -> Style {
+    Style::default().fg(p.dim)
+}
+
+fn heading(p: &Palette) -> Style {
+    Style::default().fg(p.heading)
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -36,7 +46,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    draw_header(frame, header);
+    draw_header(frame, header, &app.palette.clone());
 
     let [sidebar, detail] =
         Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
@@ -46,26 +56,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_footer(frame, footer, app);
 
     if app.show_help {
-        draw_help(frame);
+        draw_help(frame, &app.palette.clone(), &app.keymaps);
     }
 }
 
-fn draw_header(frame: &mut Frame, area: Rect) {
+fn draw_header(frame: &mut Frame, area: Rect, p: &Palette) {
     let mut spans = vec![
-        Span::styled(" hitui ", accent().add_modifier(Modifier::BOLD)),
-        Span::styled("· ", dim()),
+        Span::styled(" hitui ", accent(p).add_modifier(Modifier::BOLD)),
+        Span::styled("· ", dim(p)),
     ];
     if let Some(host) = sysfs::read("/etc/hostname") {
         spans.push(Span::raw(host));
-        spans.push(Span::styled(" · ", dim()));
+        spans.push(Span::styled(" · ", dim(p)));
     }
     if let Some(kernel) = sysfs::read("/proc/sys/kernel/osrelease") {
-        spans.push(Span::styled(format!("Linux {kernel}"), dim()));
+        spans.push(Span::styled(format!("Linux {kernel}"), dim(p)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
+    let palette = app.palette;
+    let p = &palette;
     let focused = app.focus == Focus::Sidebar;
 
     // Pages are numbered across the whole sidebar, independent of grouping, so
@@ -77,9 +89,7 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         .map(|item| match item {
             SidebarItem::Header(group) => ListItem::new(Line::from(Span::styled(
                 group.title(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                heading(p).add_modifier(Modifier::BOLD),
             ))),
             SidebarItem::Page(index) => {
                 let page = &app.pages[*index];
@@ -94,11 +104,11 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
                 let room = area.width.saturating_sub(6) as usize;
                 let mut spans = vec![
                     Span::raw("  "),
-                    Span::styled(key, dim()),
+                    Span::styled(key, dim(p)),
                     Span::raw(ellipsise(page.title(), room)),
                 ];
                 if page.error.is_some() {
-                    spans.push(Span::styled(" !", Style::default().fg(Color::Red)));
+                    spans.push(Span::styled(" !", Style::default().fg(p.danger)));
                 }
                 ListItem::new(Line::from(spans))
             }
@@ -106,11 +116,11 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let list = List::new(items)
-        .block(pane_block("Categories", focused))
+        .block(pane_block("Categories", focused, p))
         .highlight_style(
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(p.cursor_fg)
+                .bg(p.cursor_bg)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -120,6 +130,8 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
+    let palette = app.palette;
+    let p = &palette;
     let focused = app.focus == Focus::Detail;
     let title = {
         let page = app.page();
@@ -129,7 +141,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
             page.title().to_string()
         }
     };
-    let block = pane_block(&title, focused);
+    let block = pane_block(&title, focused, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -137,7 +149,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
         let text = Paragraph::new(vec![
             Line::from(Span::styled(
                 "Could not collect this page",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.danger).add_modifier(Modifier::BOLD),
             )),
             Line::raw(""),
             Line::from(Span::raw(error)),
@@ -158,13 +170,13 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!("no field matches `{}`", app.filter),
-                dim(),
+                dim(p),
             ))),
             inner,
         );
         return;
     }
-    let lines = build_lines(&rows, content_width);
+    let lines = build_lines(&rows, content_width, p);
 
     // Hand the geometry back to the app so key handling can page and clamp.
     let page = app.page_mut();
@@ -190,7 +202,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .style(dim()),
+                .style(dim(p)),
             // Drawn over the block's right border, inset so the corners survive.
             Rect {
                 x: area.right().saturating_sub(1),
@@ -205,7 +217,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &mut App) {
 
 /// Turn logical rows into rendered lines, wrapping long values into the value
 /// column so that flag lists and mitigation strings stay readable.
-fn build_lines(rows: &[&Row], width: usize) -> Vec<Line<'static>> {
+fn build_lines(rows: &[&Row], width: usize, p: &Palette) -> Vec<Line<'static>> {
     let label_width = rows
         .iter()
         .filter(|r| !r.is_spacer() && r.value.is_some())
@@ -229,12 +241,12 @@ fn build_lines(rows: &[&Row], width: usize) -> Vec<Line<'static>> {
         if row.is_group {
             let mut spans = vec![
                 Span::raw(indent),
-                Span::styled(row.label.clone(), accent().add_modifier(Modifier::BOLD)),
+                Span::styled(row.label.clone(), accent(p).add_modifier(Modifier::BOLD)),
             ];
             // Name the tool a section's data came from, when it was not the
             // kernel, so the reader can judge the numbers.
             if let Some(source) = &row.source {
-                spans.push(Span::styled(format!("  via {source}"), dim()));
+                spans.push(Span::styled(format!("  via {source}"), dim(p)));
             }
             lines.push(Line::from(spans));
             continue;
@@ -243,7 +255,7 @@ fn build_lines(rows: &[&Row], width: usize) -> Vec<Line<'static>> {
         let Some(value) = &row.value else { continue };
         let key = format!("{indent}{}", row.label);
         let pad = label_width.saturating_sub(key.chars().count());
-        let label_span = Span::styled(format!("{key}{} ", " ".repeat(pad)), dim());
+        let label_span = Span::styled(format!("{key}{} ", " ".repeat(pad)), dim(p));
 
         match value {
             Value::Gauge {
@@ -257,6 +269,7 @@ fn build_lines(rows: &[&Row], width: usize) -> Vec<Line<'static>> {
                     label.as_deref(),
                     *polarity,
                     value_width,
+                    p,
                 ));
                 lines.push(Line::from(spans));
             }
@@ -286,6 +299,7 @@ fn gauge_spans(
     label: Option<&str>,
     polarity: Polarity,
     width: usize,
+    p: &Palette,
 ) -> Vec<Span<'static>> {
     const MIN_BAR: usize = 8;
     const MAX_BAR: usize = 24;
@@ -308,16 +322,19 @@ fn gauge_spans(
         Polarity::HighIsGood => 100.0 - percent,
     };
     let style = Style::default().fg(if severity >= 90.0 {
-        Color::Red
+        p.danger
     } else if severity >= 70.0 {
-        Color::Yellow
+        p.warn
     } else {
-        Color::Green
+        p.ok
     });
 
     vec![
         Span::styled("█".repeat(filled), style),
-        Span::styled("░".repeat(bar_width - filled), dim()),
+        Span::styled(
+            "░".repeat(bar_width - filled),
+            Style::default().fg(p.gauge_track),
+        ),
         Span::raw(caption),
     ]
 }
@@ -373,14 +390,16 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let palette = app.palette;
+    let p = &palette;
     // While typing, the footer is the search prompt.
     if app.searching {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" /", accent().add_modifier(Modifier::BOLD)),
+                Span::styled(" /", accent(p).add_modifier(Modifier::BOLD)),
                 Span::raw(app.filter.clone()),
-                Span::styled("▏", accent()),
-                Span::styled("   Enter keep · Esc clear", dim()),
+                Span::styled("▏", accent(p)),
+                Span::styled("   Enter keep · Esc clear", dim(p)),
             ])),
             area,
         );
@@ -394,7 +413,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             .count();
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" filter ", accent().add_modifier(Modifier::BOLD)),
+                Span::styled(" filter ", accent(p).add_modifier(Modifier::BOLD)),
                 Span::raw(app.filter.clone()),
                 Span::styled(
                     if matched == 1 {
@@ -402,110 +421,162 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                     } else {
                         format!("   {matched} fields")
                     },
-                    dim(),
+                    dim(p),
                 ),
-                Span::styled("   Esc clear · / edit", dim()),
+                Span::styled("   Esc clear · / edit", dim(p)),
             ])),
             area,
         );
         return;
     }
 
+    // Every hint below names the key actually bound, looked up rather than
+    // written out — a rebound keymap would otherwise make the footer lie.
+    let browser = app.keymaps.get(Mode::Browser);
+    let hint = |action: Action| -> Option<String> {
+        browser
+            .combos_for(action)
+            // The first binding is the primary one; listing all of them would
+            // not fit on one line.
+            .first()
+            .map(|combo| combo.to_string())
+    };
+
     // A page with an action advertises it ahead of the generic bindings:
     // nothing else on screen says that Enter does anything.
-    if let Some(action) = app.page().action() {
-        let mut spans = vec![
-            Span::raw(" "),
-            Span::styled("Enter", accent().add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {action}   "), dim()),
-        ];
-        for (key, label) in [
-            ("j/k", "scroll"),
-            ("h", "pages"),
-            ("?", "help"),
-            ("q", "quit"),
+    if let Some(label) = app.page().action() {
+        let mut spans = vec![Span::raw(" ")];
+        for (action, text) in [
+            (Action::Activate, label),
+            (Action::MoveDown, "scroll"),
+            (Action::FocusSidebar, "pages"),
+            (Action::Help, "help"),
+            (Action::Quit, "quit"),
         ] {
-            spans.push(Span::styled(key, accent().add_modifier(Modifier::BOLD)));
-            spans.push(Span::styled(format!(" {label}   "), dim()));
+            if let Some(key) = hint(action) {
+                spans.push(Span::styled(key, accent(p).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(format!(" {text}   "), dim(p)));
+            }
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
 
-    let keys: &[(&str, &str)] = match app.focus {
-        Focus::Sidebar => &[
-            ("j/k", "page"),
-            ("l", "details"),
-            ("/", "search"),
-            ("r", "refresh"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
-        Focus::Detail => &[
-            ("j/k", "scroll"),
-            ("g/G", "top/bottom"),
-            ("h", "pages"),
-            ("/", "search"),
-            ("r", "refresh"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
+    // Movement is shown as a pair, since the two halves are always bound
+    // together and "j/k" reads better than two separate hints.
+    let movement = match (hint(Action::MoveDown), hint(Action::MoveUp)) {
+        (Some(down), Some(up)) => Some(format!("{down}/{up}")),
+        (one, other) => one.or(other),
+    };
+    let extremes = match (hint(Action::Top), hint(Action::Bottom)) {
+        (Some(top), Some(bottom)) => Some(format!("{top}/{bottom}")),
+        (one, other) => one.or(other),
     };
 
+    let mut hints: Vec<(Option<String>, &str)> = vec![(
+        movement,
+        if app.focus == Focus::Sidebar {
+            "page"
+        } else {
+            "scroll"
+        },
+    )];
+    match app.focus {
+        Focus::Sidebar => hints.push((hint(Action::FocusDetail), "details")),
+        Focus::Detail => {
+            hints.push((extremes, "top/bottom"));
+            hints.push((hint(Action::FocusSidebar), "pages"));
+        }
+    }
+    hints.extend([
+        (hint(Action::Search), "search"),
+        (hint(Action::Refresh), "refresh"),
+        (hint(Action::Help), "help"),
+        (hint(Action::Quit), "quit"),
+    ]);
+
     let mut spans = vec![Span::raw(" ")];
-    for (key, action) in keys {
-        spans.push(Span::styled(*key, accent().add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(format!(" {action}   "), dim()));
+    for (key, label) in hints {
+        // An action nobody bound gets no hint, rather than a blank one.
+        if let Some(key) = key {
+            spans.push(Span::styled(key, accent(p).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(format!(" {label}   "), dim(p)));
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_help(frame: &mut Frame) {
-    let rows = [
-        ("j / k, ↓ / ↑", "move or scroll"),
-        ("h / l, ← / →", "switch pane"),
-        ("Tab", "toggle pane focus"),
-        ("1 – 9", "jump to page"),
-        ("/", "filter fields on this page"),
-        ("Enter", "run this page's action, if it has one"),
-        ("g / G, Home / End", "top / bottom"),
-        ("PgUp / PgDn", "scroll a screen"),
-        ("r", "re-collect this page"),
-        ("?", "this help"),
-        ("q, Esc, Ctrl-C", "quit"),
-    ];
+/// The key help, generated from the resolved keymap.
+///
+/// Listing the defaults here instead would be a lie the moment anybody
+/// rebinds anything — which is the whole point of the config.
+fn draw_help(frame: &mut Frame, p: &Palette, keymaps: &Keymaps) {
+    let browser = keymaps.get(Mode::Browser);
+
+    let mut rows: Vec<(String, &str)> = Vec::new();
+    for action in Action::ALL {
+        let combos = browser.combos_for(action);
+        if combos.is_empty() {
+            continue;
+        }
+        let keys: Vec<String> = combos.iter().map(|c| c.to_string()).collect();
+        rows.push((keys.join(", "), action.describe()));
+    }
+    // Not an action, since which page each digit reaches depends on how many
+    // pages there are — but it is still a binding worth documenting.
+    rows.push(("1 – 9".to_string(), "jump to a page by number"));
+
+    let width = rows
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(8);
 
     let mut lines = vec![Line::raw("")];
-    for (key, action) in rows {
+    for (key, action) in &rows {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("{key:<20}"), accent().add_modifier(Modifier::BOLD)),
-            Span::raw(action),
+            Span::styled(
+                format!("{key:<width$}  "),
+                accent(p).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(*action),
         ]));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "  any other key closes this",
-        dim(),
+        dim(p),
     )));
 
+    // Sized to the content rather than fixed: the rows are generated from the
+    // keymap, so their width depends on how many keys an action carries and
+    // a fixed 54 columns truncated the descriptions.
+    let longest = rows
+        .iter()
+        .map(|(key, action)| key.chars().count() + action.chars().count())
+        .max()
+        .unwrap_or(40);
     let height = lines.len() as u16 + 2;
-    let area = centered(frame.area(), 54, height);
+    let area = centered(frame.area(), longest as u16 + 8, height);
     frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).block(pane_block("Keys", true)), area);
+    frame.render_widget(
+        Paragraph::new(lines).block(pane_block("Keys", true, p)),
+        area,
+    );
 }
 
-fn pane_block(title: &str, focused: bool) -> Block<'static> {
-    let border = if focused { accent() } else { dim() };
+fn pane_block(title: &str, focused: bool, p: &Palette) -> Block<'static> {
+    let border = if focused { accent(p) } else { dim(p) };
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(border)
         .title(Line::from(Span::styled(
             format!(" {title} "),
             if focused {
-                accent().add_modifier(Modifier::BOLD)
+                accent(p).add_modifier(Modifier::BOLD)
             } else {
-                dim()
+                dim(p)
             },
         )))
         .title_alignment(Alignment::Left)
@@ -525,6 +596,8 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::theme::Preset;
+    use ratatui::style::Color;
 
     #[test]
     fn long_titles_are_marked_as_clipped() {
@@ -569,7 +642,7 @@ mod tests {
 
     /// The colour of a gauge's filled portion.
     fn gauge_colour(percent: f64, polarity: Polarity) -> Option<Color> {
-        gauge_spans(percent, None, polarity, 60)
+        gauge_spans(percent, None, polarity, 60, &Preset::Terminal.palette())
             .first()
             .and_then(|span| span.style.fg)
     }
@@ -599,7 +672,13 @@ mod tests {
         // 0 % and 100 % are the off-by-one candidates.
         for percent in [0.0, 0.4, 50.0, 99.6, 100.0] {
             for polarity in [Polarity::HighIsBad, Polarity::HighIsGood] {
-                let spans = gauge_spans(percent, Some("caption"), polarity, 48);
+                let spans = gauge_spans(
+                    percent,
+                    Some("caption"),
+                    polarity,
+                    48,
+                    &Preset::Terminal.palette(),
+                );
                 let rendered: usize = spans.iter().map(|s| s.content.chars().count()).sum();
                 assert!(
                     rendered <= 48,
@@ -628,6 +707,124 @@ mod tests {
         let text = rendered.join("\n");
         println!("{text}");
         text
+    }
+
+    /// The style of the first cell matching `needle`, for theme assertions.
+    fn style_of(app: &mut App, needle: &str) -> Option<ratatui::style::Style> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(96, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if let Some(column) = row.find(needle) {
+                return Some(buffer[(column as u16, y)].style());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_theme_preset_reaches_the_rendered_frame() {
+        // The whole point of the config: a preset must actually change what
+        // is drawn, not merely parse.
+        let config = crate::config::Config::from_str(
+            r#"
+            [theme]
+            preset = "gruvbox-dark"
+            "#,
+        )
+        .expect("valid config");
+
+        let mut app = App::with_config(&config);
+        app.page_mut().reload();
+
+        let style = style_of(&mut app, "hitui").expect("the title is drawn");
+        assert_eq!(
+            style.fg,
+            Some(Color::Rgb(0xfa, 0xbd, 0x2f)),
+            "the title should use gruvbox's accent"
+        );
+    }
+
+    #[test]
+    fn a_colour_override_beats_the_preset_on_screen() {
+        let config = crate::config::Config::from_str(
+            r##"
+            [theme]
+            preset = "nord"
+            [theme.colors]
+            accent = "#ff0000"
+            "##,
+        )
+        .expect("valid config");
+
+        let mut app = App::with_config(&config);
+        app.page_mut().reload();
+
+        let style = style_of(&mut app, "hitui").expect("the title is drawn");
+        assert_eq!(style.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
+    }
+
+    #[test]
+    fn the_default_theme_leaves_the_terminal_palette_alone() {
+        let mut app = App::new();
+        app.page_mut().reload();
+
+        // Reset means "whatever the terminal uses", which is what keeps a
+        // transparent background transparent.
+        let palette = app.palette;
+        assert_eq!(palette.bg, Color::Reset);
+        assert_eq!(palette.fg, Color::Reset);
+    }
+
+    #[test]
+    fn the_footer_names_the_keys_that_are_actually_bound() {
+        // A rebound keymap must not leave the footer advertising j/k.
+        let config = crate::config::Config::from_str(
+            r#"
+            [keys.browser]
+            set = [["MoveDown", "e"], ["MoveUp", "i"], ["FocusDetail", "o"]]
+            "#,
+        )
+        .expect("valid config");
+
+        let mut app = App::with_config(&config);
+        app.page_mut().reload();
+        let text = render(96, 40, &mut app);
+
+        let footer = text.lines().last().expect("a footer line");
+        assert!(footer.contains("e/i"), "footer should show e/i: {footer}");
+        assert!(!footer.contains("j/k"), "footer still shows j/k: {footer}");
+    }
+
+    #[test]
+    fn the_help_overlay_lists_the_resolved_bindings() {
+        let config = crate::config::Config::from_str(
+            r#"
+            [keys.browser]
+            set = [["Quit", "x"]]
+            "#,
+        )
+        .expect("valid config");
+
+        let mut app = App::with_config(&config);
+        app.page_mut().reload();
+        app.show_help = true;
+        let text = render(96, 40, &mut app);
+
+        // The overlay is generated from the keymap, so it shows x for quit.
+        assert!(text.contains("quit"), "the quit row should appear");
+        let quit_row = text
+            .lines()
+            .find(|l| l.contains("quit") && !l.contains("Categories"))
+            .expect("a quit row");
+        assert!(quit_row.contains('x'), "{quit_row}");
     }
 
     #[test]

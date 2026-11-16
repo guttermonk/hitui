@@ -7,6 +7,10 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::DefaultTerminal;
 
 use crate::collect::{Collector, Group, registry};
+use crate::config::Config;
+use crate::config::theme::{self, Palette};
+use crate::keys::combo::ModifiedKey;
+use crate::keys::{Action, Keymaps, Mode, Resolution};
 use crate::model::{Node, Value};
 use crate::ui;
 
@@ -226,11 +230,26 @@ pub struct App {
     /// Row filter. Typed live when `searching`, then kept until cleared.
     pub filter: String,
     pub searching: bool,
+    /// Resolved colours, from `[theme]`.
+    pub palette: Palette,
+    /// Resolved bindings, from `[keys.*]`.
+    pub keymaps: Keymaps,
+    /// Keys pressed so far towards a chord. Empty unless one is in progress.
+    pending: Vec<ModifiedKey>,
     quit: bool,
 }
 
 impl App {
+    /// Build with the defaults.
+    ///
+    /// Only tests need this: the binary always has a `Config`, defaulted
+    /// when there is no file.
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_config(&Config::default())
+    }
+
+    pub fn with_config(config: &Config) -> Self {
         let pages: Vec<Page> = registry().into_iter().map(Page::new).collect();
 
         // Build the sidebar by walking the groups in display order, emitting a
@@ -263,7 +282,25 @@ impl App {
             show_help: false,
             filter: String::new(),
             searching: false,
+            // Already validated when the config loaded, so this cannot fail
+            // here; the default palette is a safe fallback regardless.
+            palette: config
+                .palette()
+                .unwrap_or_else(|_| theme::Preset::Terminal.palette()),
+            keymaps: config.keymaps(),
+            pending: Vec::new(),
             quit: false,
+        }
+    }
+
+    /// Which keymap applies right now.
+    fn mode(&self) -> Mode {
+        if self.searching {
+            Mode::Search
+        } else if self.show_help {
+            Mode::Help
+        } else {
+            Mode::Browser
         }
     }
 
@@ -318,108 +355,133 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
-        if ctrl && matches!(key.code, KeyCode::Char('c')) {
-            self.quit = true;
+        let Some(pressed) = ModifiedKey::from_event(key) else {
             return;
+        };
+        let mode = self.mode();
+
+        // Accumulate towards a chord, then ask the keymap what it means.
+        self.pending.push(pressed);
+        match self.keymaps.get(mode).resolve(&self.pending) {
+            // A prefix of something longer: wait for the rest.
+            Resolution::Pending => return,
+            Resolution::Action(action) => {
+                self.pending.clear();
+                self.dispatch(action);
+                return;
+            }
+            Resolution::None => self.pending.clear(),
         }
 
-        // Typing a filter swallows every other binding.
-        if self.searching {
-            match key.code {
-                KeyCode::Char('u') if ctrl => self.filter.clear(),
-                KeyCode::Char(c) => self.filter.push(c),
-                KeyCode::Backspace => {
-                    self.filter.pop();
+        // Nothing bound. What an unbound key does depends on the mode.
+        match mode {
+            // Printable keys are the filter text, which is why so little is
+            // bound in this mode.
+            Mode::Search => {
+                match key.code {
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.filter.clear();
+                    }
+                    KeyCode::Char(c) => self.filter.push(c),
+                    KeyCode::Backspace => {
+                        self.filter.pop();
+                    }
+                    _ => {}
                 }
-                KeyCode::Enter => self.searching = false,
-                KeyCode::Esc => {
-                    self.searching = false;
-                    self.filter.clear();
-                }
-                _ => {}
+                // Keep the top of the matches in view as the query narrows.
+                self.page_mut().scroll = 0;
             }
-            // Keep the top of the matches in view as the query narrows.
-            self.page_mut().scroll = 0;
-            return;
+            // Any key dismisses the overlay.
+            Mode::Help => self.show_help = false,
+            Mode::Browser => {
+                // Digits jump to a page by ordinal. Checked *after* the
+                // keymap, so a digit somebody binds themselves wins.
+                if let KeyCode::Char(c @ '1'..='9') = key.code {
+                    self.jump_to_page(c as usize - '1' as usize);
+                }
+            }
         }
+    }
 
-        // Help is modal: dismiss it before anything else acts on the key.
-        if self.show_help {
-            match key.code {
-                KeyCode::Char('q') => self.quit = true,
-                _ => self.show_help = false,
-            }
-            return;
-        }
-
-        match key.code {
-            KeyCode::Char('d') if ctrl => self.quit = true,
-            KeyCode::Char('q') => self.quit = true,
-            // Esc backs out of a filter before it quits.
-            KeyCode::Esc => {
-                if self.filter.is_empty() {
-                    self.quit = true;
-                } else {
-                    self.filter.clear();
-                }
-            }
-            KeyCode::Char('/') => {
-                self.searching = true;
-                self.focus = Focus::Detail;
-            }
-            KeyCode::Char('?') => self.show_help = true,
-            KeyCode::Char('r') => self.page_mut().reload(),
-            // Only pages that advertise an action respond to Enter, so it
-            // cannot start work on a page the user merely scrolled onto.
-            KeyCode::Enter => {
-                let page = self.page_mut();
-                if page.collector.action().is_some() {
-                    page.collector.activate();
-                    // Re-collect immediately so the page reflects the start
-                    // rather than waiting for the next tick.
-                    page.reload();
-                }
-            }
-            KeyCode::Tab | KeyCode::BackTab => {
+    /// Carry out a resolved action.
+    fn dispatch(&mut self, action: Action) {
+        match action {
+            Action::Quit => self.quit = true,
+            Action::MoveDown => self.step(1),
+            Action::MoveUp => self.step(-1),
+            Action::FocusSidebar => self.focus = Focus::Sidebar,
+            Action::FocusDetail => self.focus = Focus::Detail,
+            Action::TogglePane => {
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Detail,
                     Focus::Detail => Focus::Sidebar,
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Sidebar,
-            KeyCode::Right | KeyCode::Char('l') => self.focus = Focus::Detail,
-            KeyCode::Down | KeyCode::Char('j') => self.step(1),
-            KeyCode::Up | KeyCode::Char('k') => self.step(-1),
-            KeyCode::PageDown => self.page_by(1),
-            KeyCode::PageUp => self.page_by(-1),
-            KeyCode::Home | KeyCode::Char('g') => match self.focus {
+            Action::PageDown => self.page_by(1),
+            Action::PageUp => self.page_by(-1),
+            Action::Top => match self.focus {
                 Focus::Sidebar => self.select_first(),
                 Focus::Detail => self.page_mut().scroll = 0,
             },
-            KeyCode::End | KeyCode::Char('G') => match self.focus {
+            Action::Bottom => match self.focus {
                 Focus::Sidebar => self.select_last(),
                 Focus::Detail => {
                     let page = self.page_mut();
                     page.scroll = page.max_scroll();
                 }
             },
-            // Jump straight to a page by ordinal, skipping group headings.
-            KeyCode::Char(c @ '1'..='9') => {
-                let ordinal = c as usize - '1' as usize;
-                if let Some(index) = self
-                    .sidebar
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| matches!(item, SidebarItem::Page(_)))
-                    .nth(ordinal)
-                    .map(|(i, _)| i)
-                {
-                    self.selected = index;
+            Action::Search => {
+                self.searching = true;
+                self.focus = Focus::Detail;
+            }
+            // One key, doing the least destructive thing available: leave the
+            // filter field, else drop the filter, else close the help, else
+            // quit. That ordering is why Esc is safe to press twice.
+            Action::ClearFilter => {
+                if self.searching {
+                    self.searching = false;
+                    self.filter.clear();
+                    self.page_mut().scroll = 0;
+                } else if self.show_help {
+                    self.show_help = false;
+                } else if !self.filter.is_empty() {
+                    self.filter.clear();
+                } else {
+                    self.quit = true;
                 }
             }
-            _ => {}
+            Action::Refresh => self.page_mut().reload(),
+            Action::Activate => {
+                if self.searching {
+                    // Commit the filter and leave the field.
+                    self.searching = false;
+                    return;
+                }
+                // Only pages that advertise an action respond, so this cannot
+                // start work on a page the user merely scrolled onto.
+                let page = self.page_mut();
+                if page.collector.action().is_some() {
+                    page.collector.activate();
+                    // Re-collect at once so the page reflects the start rather
+                    // than waiting for the next tick.
+                    page.reload();
+                }
+            }
+            Action::Help => self.show_help = !self.show_help,
+        }
+    }
+
+    /// Select the nth page, skipping group headings.
+    fn jump_to_page(&mut self, ordinal: usize) {
+        if let Some(index) = self
+            .sidebar
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| matches!(item, SidebarItem::Page(_)))
+            .nth(ordinal)
+            .map(|(i, _)| i)
+        {
+            self.selected = index;
         }
     }
 

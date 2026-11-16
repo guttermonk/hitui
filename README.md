@@ -20,6 +20,8 @@ cargo run -- --json    # whole report as JSON
 cargo run -- --json cpu
 cargo run -- cpu       # open the browser on a specific page
 cargo run -- --json --bench   # include a benchmark run in the report
+cargo run -- --keys    # the resolved keybindings
+cargo run -- --theme   # the resolved palette
 ```
 
 With Nix:
@@ -32,6 +34,8 @@ nix flake check        # builds, runs the test suite, and lints with clippy -D w
 
 ## Keys
 
+Defaults — all of them rebindable, see [Configuration](#configuration).
+
 | Key | Action |
 | --- | --- |
 | `j` / `k`, `↓` / `↑` | move in the sidebar, or scroll the detail pane |
@@ -42,10 +46,76 @@ nix flake check        # builds, runs the test suite, and lints with clippy -D w
 | `Enter` | run the current page's action, where it has one (Benchmarks) |
 | `Esc` | clear the filter, or quit |
 | `g` / `G`, `Home` / `End` | top / bottom |
-| `PgUp` / `PgDn` | scroll a screen |
+| `PgUp` / `PgDn`, `Ctrl-D` / `Ctrl-U` | scroll a screen |
 | `r` | re-collect the current page |
 | `?` | key help |
 | `q`, `Ctrl-C` | quit |
+
+## Configuration
+
+`~/.config/hitui/config.toml` (or `$XDG_CONFIG_HOME/hitui/config.toml`). It is
+optional; without it you get the table above and the terminal's own colours.
+[`config.example.toml`](config.example.toml) is the annotated full set, every
+value at its default — copy it and edit.
+
+Unknown keys are errors rather than silent no-ops, and the config is parsed
+before the terminal enters raw mode, so a typo reports itself legibly instead
+of scrolling past a redraw.
+
+### Themes
+
+```toml
+[theme]
+preset = "gruvbox-dark"   # terminal (default), catppuccin-mocha,
+                          # catppuccin-latte, gruvbox-dark, nord, dracula,
+                          # one-dark, solarized-dark
+
+[theme.colors]            # override any slot of the preset
+border_focused = "#fabd2f"
+accent = "bright-cyan"    # hex, or an ANSI colour name
+```
+
+The default preset is `terminal`: every slot resolves to `Reset`, so hitui
+inherits whatever your terminal is themed with and nothing fights your
+colourscheme. The fifteen slots are `fg`, `bg`, `dim`, `border`,
+`border_focused`, `heading`, `accent`, `cursor_fg`, `cursor_bg`, `status_fg`,
+`status_bg`, `gauge_track`, `ok`, `warn`, `danger`.
+
+`hitui --theme` prints the resolved result and marks which slots an override
+took over, which is the quick way to tell a bad hex code from a slot name you
+misremembered.
+
+### Keybindings
+
+Four layers, applied in order. `set` replaces an action's keys, `extra` adds to
+them, `unbind` removes:
+
+```toml
+[keys.browser]
+# Colemak-DH home row instead of hjkl
+set = [
+    ["MoveDown", "e"],
+    ["MoveUp", "i"],
+    ["FocusSidebar", "n"],
+    ["FocusDetail", "o"],
+]
+extra = [["Refresh", "F5"]]
+unbind = ["ctrl+d"]
+```
+
+`set` replaces only the *letter* keys for that action — the arrows survive, so
+rebinding navigation can never leave you with no way to move. `extra` displaces
+any binding it collides with, including a prefix of one. `unbind` is
+prefix-based and applied last, so removing a prefix removes the sequences under
+it.
+
+`hitui --keys` prints what the layers actually produced, and names any action
+that ended up unreachable — the one mistake these layers can make that is
+otherwise silent. The footer and the `?` overlay are generated from the same
+resolved keymap, so they describe your bindings rather than the defaults.
+
+Sections are `[keys.browser]`, `[keys.search]` and `[keys.help]`, matching the
+three modes.
 
 ## Architecture
 
@@ -85,6 +155,8 @@ SSD spare blocks, capacity against design) and reddens as it empties.
 | `src/sysfs.rs` | `/proc` and `/sys` parsing helpers |
 | `src/probe.rs` | optional external tools — discovery, timeout, capture |
 | `src/collect/` | one module per page |
+| `src/config/` | config file, theme presets, palette resolution |
+| `src/keys/` | key combos, actions, the four binding layers |
 | `src/app.rs` | state, key handling, row flattening, field filter |
 | `src/ui.rs` | rendering — knows nothing about data sources |
 
