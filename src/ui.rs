@@ -1046,6 +1046,18 @@ mod tests {
 
     /// The style of the first cell matching `needle`, for theme assertions.
     fn style_of(app: &mut App, needle: &str) -> Option<ratatui::style::Style> {
+        style_of_from(app, needle, 0)
+    }
+
+    /// Style of the first cell where `needle` begins, searching only at or
+    /// after column `from`.
+    ///
+    /// The bound is not optional for anything looking at page content: the
+    /// sidebar lists page titles, so "Kernel" matches "Kernel Modules" there —
+    /// drawn with `Span::raw`, hence `Reset` — several rows before it reaches
+    /// the Summary field of the same name. Passed 0 for the header, which is
+    /// drawn to the left of everything.
+    fn style_of_from(app: &mut App, needle: &str, from: u16) -> Option<ratatui::style::Style> {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -1054,14 +1066,32 @@ mod tests {
         let buffer = terminal.backend().buffer();
 
         for y in 0..buffer.area.height {
-            let row: String = (0..buffer.area.width)
+            let row: String = (from..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol())
                 .collect();
-            if let Some(column) = row.find(needle) {
-                return Some(buffer[(column as u16, y)].style());
+            if let Some(column) = column_of(&row, needle) {
+                return Some(buffer[(from + column as u16, y)].style());
             }
         }
         None
+    }
+
+    /// Where `needle` starts in a rendered row, counted in cells.
+    ///
+    /// `str::find` returns a byte offset, and a frame is full of box-drawing
+    /// characters that are three bytes each — so a byte offset into a row that
+    /// crosses a pane border is not a column, and indexing the buffer with one
+    /// reads a cell several places to the right of the match.
+    fn column_of(row: &str, needle: &str) -> Option<usize> {
+        row.find(needle).map(|byte| row[..byte].chars().count())
+    }
+
+    #[test]
+    fn a_rendered_row_is_searched_by_cell_not_by_byte() {
+        // Three box-drawing characters: three cells, nine bytes.
+        assert_eq!(column_of("│─│Kernel", "Kernel"), Some(3));
+        assert_eq!(column_of("Kernel", "Kernel"), Some(0));
+        assert_eq!(column_of("│─│", "Kernel"), None);
     }
 
     #[test]
@@ -1073,7 +1103,8 @@ mod tests {
         let mut app = App::with_config(&config);
         app.page_mut().reload();
 
-        let style = style_of(&mut app, "Kernel").expect("a field label is drawn");
+        let style =
+            style_of_from(&mut app, "Kernel", SIDEBAR_WIDTH).expect("a field label is drawn");
         assert_eq!(
             style.fg,
             Some(Color::Reset),
@@ -1098,7 +1129,8 @@ mod tests {
         let mut app = App::with_config(&config);
         app.page_mut().reload();
 
-        let style = style_of(&mut app, "Kernel").expect("a field label is drawn");
+        let style =
+            style_of_from(&mut app, "Kernel", SIDEBAR_WIDTH).expect("a field label is drawn");
         assert_eq!(style.fg, Some(Color::Rgb(0xff, 0, 0)));
         assert!(
             !style.add_modifier.contains(Modifier::DIM),
