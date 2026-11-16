@@ -119,6 +119,14 @@ pub trait Collector {
     /// Perform that action. Must return promptly: anything long-running
     /// belongs on a worker thread, or the interface stops redrawing.
     fn activate(&mut self) {}
+
+    /// Take whatever this collector needs from the config.
+    ///
+    /// Almost nothing does — a collector reports what it finds and has no
+    /// settings — so the default is to ignore it. Threaded through rather
+    /// than read from a global, for the same reason the palette is: a test
+    /// has to be able to collect under a configuration of its choosing.
+    fn configure(&mut self, _config: &crate::config::Config) {}
 }
 
 /// Every collector. Sidebar order is by [`Group::ALL`], then by registration

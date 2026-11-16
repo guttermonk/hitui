@@ -99,7 +99,7 @@ fn main() -> Result<()> {
     }
 
     if cli.json {
-        return print_json(&cli.categories, cli.bench);
+        return print_json(&cli.categories, cli.bench, &config);
     }
     if cli.bench {
         bail!("--bench only applies to --json; in the browser, open Benchmarks and press Enter");
@@ -247,7 +247,7 @@ fn describe_colour(colour: ratatui::style::Color) -> String {
     }
 }
 
-fn print_json(filter: &[String], bench: bool) -> Result<()> {
+fn print_json(filter: &[String], bench: bool, config: &config::Config) -> Result<()> {
     let mut report = Map::new();
     for mut collector in collect::registry() {
         if !filter.is_empty() && !filter.iter().any(|f| f == collector.id()) {
@@ -256,7 +256,7 @@ fn print_json(filter: &[String], bench: bool) -> Result<()> {
         // The benchmarks page reads shared state that only the interactive
         // runner fills, so a scripted run has to do the work itself.
         if bench && collector.id() == "benchmarks" {
-            let nodes = collect::benchmarks::run_now();
+            let nodes = collect::benchmarks::run_now(&config.benchmarks);
             report.insert(collector.id().to_string(), serde_json::to_value(nodes)?);
             continue;
         }

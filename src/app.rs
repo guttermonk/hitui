@@ -252,7 +252,13 @@ impl App {
     }
 
     pub fn with_config(config: &Config) -> Self {
-        let pages: Vec<Page> = registry().into_iter().map(Page::new).collect();
+        let pages: Vec<Page> = registry()
+            .into_iter()
+            .map(|mut collector| {
+                collector.configure(config);
+                Page::new(collector)
+            })
+            .collect();
 
         // Build the sidebar by walking the groups in display order, emitting a
         // heading only for groups that actually have pages.

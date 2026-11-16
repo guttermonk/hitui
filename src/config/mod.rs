@@ -28,6 +28,7 @@ pub struct Config {
     /// Per-mode keybinding layers.
     pub keys: BTreeMap<Mode, KeymapSection>,
     pub layout: Layout,
+    pub benchmarks: Benchmarks,
 
     /// What a colour overlay contributed, if one was read. Not a config key:
     /// the loader fills it in and `--theme` reports it.
@@ -43,6 +44,46 @@ pub struct Overlay {
     pub applied: Vec<String>,
     /// Keys it named that are not colour slots, dropped on the way through.
     pub ignored: Vec<String>,
+}
+
+/// What the Benchmarks page keeps, and what it is allowed to send.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Benchmarks {
+    /// Save each run so later runs can be compared against it.
+    ///
+    /// On by default, because nothing is written unless a benchmark was
+    /// explicitly asked for, the file is plain JSON under $XDG_STATE_HOME,
+    /// and a comparison is the main thing anyone wants from a second run.
+    pub history: bool,
+
+    /// How many runs to keep, newest first out of the far end.
+    pub history_limit: usize,
+
+    /// Upload results so they can be compared against other machines.
+    ///
+    /// Off, and there is deliberately nothing behind it yet: see
+    /// [`Benchmarks::share_endpoint`].
+    pub share: bool,
+
+    /// Where results would be sent.
+    ///
+    /// Empty by default and with no built-in value, so hitui cannot reach a
+    /// server nobody named. Uploading is not implemented in this build; the
+    /// Benchmarks page says so rather than leaving the setting to look as
+    /// though it did something.
+    pub share_endpoint: String,
+}
+
+impl Default for Benchmarks {
+    fn default() -> Self {
+        Self {
+            history: true,
+            history_limit: 20,
+            share: false,
+            share_endpoint: String::new(),
+        }
+    }
 }
 
 /// How the detail pane spends the width it has.
@@ -125,6 +166,15 @@ impl Config {
         // column — say so rather than silently reading it as 1.
         if self.layout.max_columns == 0 {
             bail!("layout.max_columns must be at least 1");
+        }
+        // Keeping zero runs is not a shorter history, it is no history —
+        // which `history = false` already says, so this would be a setting
+        // that silently contradicts the one next to it.
+        if self.benchmarks.history && self.benchmarks.history_limit == 0 {
+            bail!(
+                "benchmarks.history_limit must be at least 1 when history is on \
+                 (set history = false to keep nothing)"
+            );
         }
         Ok(())
     }

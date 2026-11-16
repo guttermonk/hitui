@@ -127,6 +127,38 @@ preset = "terminal"
 # Set to 1 to keep every page in a single column.
 max_columns = 4
 
+# ─── Benchmarks ──────────────────────────────────────────────────────────────
+
+[benchmarks]
+# Save each run so later runs can be compared against it. Written only when a
+# benchmark was explicitly asked for -- Enter on the page, or --json --bench --
+# to $XDG_STATE_HOME/hitui/benchmarks.json, which can be deleted at any time.
+#
+# The comparison is against this machine's own past, which is the comparison
+# that means anything: same hardware, same workload, one variable changed. A
+# difference smaller than what the benchmark can repeat is reported as
+# "unchanged" rather than as a trend -- 5 % for processor and floating point,
+# 15 % for memory, 25 % for storage, because the kinds are not equally
+# repeatable and an SSD's write cache alone will move a storage figure 20 %.
+history = true
+
+# How many runs to keep. The oldest fall off the end.
+history_limit = 20
+
+# Upload results so they can be compared against other machines.
+#
+# Off, and there is deliberately nothing behind it: no uploading is
+# implemented in this build. The setting exists so the consent is yours to
+# give rather than something to be added later without asking, and the
+# Benchmarks page states which of the three states it is in -- off, on with no
+# endpoint, or on with an endpoint and no implementation -- so it can never
+# look as though it did something it did not.
+share = false
+
+# Where results would be sent. There is no built-in value and no default
+# server, so hitui cannot reach somewhere nobody named.
+share_endpoint = ""
+
 # ─── Keybindings ─────────────────────────────────────────────────────────────
 #
 # Defaults are vim-style: h/j/k/l to move and switch panes, g/G for top and

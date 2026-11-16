@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 pub mod cpu;
 pub mod fpu;
+pub mod history;
 pub mod memory;
 pub mod storage;
 
@@ -44,6 +45,7 @@ impl Kind {
 }
 
 /// One measurement.
+#[derive(Debug, Clone)]
 pub struct Measurement {
     /// The figure, already in its unit.
     pub value: f64,

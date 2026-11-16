@@ -191,6 +191,19 @@ column may get, since a bar and its caption cannot wrap.
 
 `[layout] max_columns` caps it; `1` keeps every page in a single column.
 
+### Benchmarks
+
+```toml
+[benchmarks]
+history = true        # save each run so the next can be compared against it
+history_limit = 20
+share = false         # off, and nothing is implemented behind it
+share_endpoint = ""   # no default: it cannot reach a server nobody named
+```
+
+See [Benchmarks](#benchmarks-1) for what the comparison reports and why the
+sharing switch exists before the feature does.
+
 ### Keybindings
 
 Four layers, applied in order. `set` replaces an action's keys, `extra` adds to
@@ -437,8 +450,46 @@ eighteen seconds.
 - [x] **Floating point** — radix-2 FFT in MFLOP/s, sphere raytracing
 - [x] **Memory** — copy bandwidth, and latency at each level of the cache hierarchy
 - [x] **Storage** — sequential write with fsync
+- [x] **Comparison against your own past runs** — see below
 - [ ] GPU throughput — needs a graphics context a terminal cannot create
-- [ ] Shared result comparison — would mean uploading your hardware profile to a third party
+- [ ] Comparison against *other* machines — the switch exists and is off; see below
+
+Each run is saved to `$XDG_STATE_HOME/hitui/benchmarks.json` and the next one
+reports how it compares:
+
+```
+Blowfish (all cores)    852.0 MiB/s · higher is better   (8.3 % slower than 2026-11-16)
+Memory latency           83.2 ns   · lower is better     (6.6 % faster than 2026-11-16)
+```
+
+That is the comparison worth having: same hardware, same workload, one
+variable changed. A figure from someone else's laptop differs for reasons
+nobody recorded. Which direction counts as an improvement comes from the unit,
+not the sign — a latency going up is a regression and a throughput going up is
+not.
+
+A difference smaller than what the benchmark can actually repeat reads as
+"unchanged" rather than as a trend, and the floor is per kind because the kinds
+are not equally repeatable: 5 % for processor and floating point, 15 % for
+memory, 25 % for storage. Those are measured, not guessed — before best-of-three
+Fibonacci swung 77 % between runs, two consecutive runs on a busy machine still
+put copy bandwidth 35 % apart, and storage takes no best-of-N at all because an
+SSD's write cache makes the first pass the fastest. Reporting noise as a trend
+sends you hunting a regression that was never there.
+
+Nothing is written unless you asked for a run, `[benchmarks] history = false`
+turns it off, and the file can be deleted at any time.
+
+**Sharing results off this machine is a separate switch, `[benchmarks] share`,
+and it is off.** There is deliberately nothing behind it: no upload is
+implemented, hitui has no HTTP or TLS dependency to implement one with, and
+there is no default endpoint, so it cannot reach a server nobody named. The
+switch exists so that consent is yours to give rather than something added
+later without asking. The Benchmarks page states which of the three states it
+is in — off, on with no endpoint, or on with an endpoint and no implementation
+— so it can never look as though it did something it did not. A test fails if
+an HTTP client is ever added to `Cargo.toml` while that sentence is still on
+the page.
 
 ## Deviations
 
