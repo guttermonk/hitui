@@ -7,10 +7,10 @@ Reads the kernel's own interfaces (`/proc`, `/sys`) rather than shelling out to
 other tools, renders them in a two-pane browser, and can dump the whole report
 as JSON for scripting.
 
-**Status:** usable. The data model, navigation, search, external-tool layer and
-report pipeline are in place, with fourteen working pages. Remaining pages are
-listed under [Pages](#pages); the roadmap is hardinfo2 parity first, then the
-breadth `inxi` covers, then firmware and security state.
+**Status:** feature-complete for information pages. All 35 of hardinfo2's
+Computer, Devices and Network pages are implemented; **Benchmarks** is the one
+remaining group. Several pages go further than the original — see
+[Pages](#pages).
 
 ## Build and run
 
@@ -137,59 +137,83 @@ be inspected rather than trusted. That is how the Storage page can distinguish
 Grouped as hardinfo2 groups them, so anyone coming from the GTK app finds
 things where they expect. Notes name the data source each page needs.
 
-Beyond parity, still planned: bluetooth, package repositories, and RAID/LVM
-volume topology (the practical fields `inxi` carries). Already in, going
-further than hardinfo2: LUKS/LVM partition mapping and unmounted-volume
-reporting on Storage, decoded kernel taint flags, and the hardening and
-passthrough state on Security.
+Where hitui goes further than hardinfo2:
 
-A note on what is deliberately missing: **module descriptions.** They live in
-the `.ko` files, readable only by `modinfo`, and the cost is decompressing
-every module on disk — batching all 213 modules of a running kernel into one
-call still measured 32 seconds. That is a page that hangs. Adding them back
-needs background collection or an on-disk cache, not a longer timeout.
+- **Memory Devices decodes SPD directly**, so part numbers, rank geometry,
+  speed grade, ECC width and manufacture date all work **without root**.
+  hardinfo2 reads this through `dmidecode`, which cannot.
+- **Storage follows a partition to its real use.** An encrypted root reads as
+  `LUKS2 → luks-…, mounted at /, /home`, not the technically-true but useless
+  "not mounted"; encrypted swap is named as swap.
+- **USB is a port tree**, nesting each device under its hub, with every
+  interface's class and bound driver. `lsusb` needs `-t` for the topology and
+  then loses the names.
+- **Monitors decode the full EDID** — manufacturer, preferred mode, physical
+  size, pixel density, manufacture date.
+- **Values that only mean something decoded, are decoded**: kernel taint
+  `4097` as "proprietary module loaded, out-of-tree module loaded"; hardening
+  sysctls as "1 — hidden from unprivileged users"; TCP state `0A` as `LISTEN`.
+- **Security** covers hardening sysctls, lockdown, module signing and
+  IOMMU/passthrough readiness, which hardinfo2 does not report.
+
+Still planned beyond parity: bluetooth, package repositories, RAID/LVM volume
+topology.
+
+Two deliberate omissions:
+
+**Module descriptions.** They live in the `.ko` files, readable only by
+`modinfo`, and the cost is decompressing every module on disk — batching all
+213 modules of a running kernel into one call still measured 32 seconds. That
+is a page that hangs. Adding them back needs background collection or an
+on-disk cache, not a longer timeout.
+
+**Environment variable values that look like credentials** are replaced with
+their length. hardinfo2 prints everything, but `--json` output is meant to be
+pasteable into a bug report, and an environment routinely holds API tokens.
+"Set, and 40 characters long" answers the debugging question without putting
+the secret in a paste.
 
 ### Computer
 
 - [x] **Summary** — machine identity, installed hardware, capacity
-- [ ] Operating System — `/etc/os-release`, `uname`, uptime, init system
+- [x] **Operating System** — `/etc/os-release`, kernel, init, container detection
 - [x] **Security** — LSMs, lockdown, hardening sysctls, module signing, IOMMU/KVM
 - [x] **Kernel Modules** — `/proc/modules`, `/sys/module`, decoded taint flags
-- [ ] Boots — `wtmp`, or `journalctl --list-boots` where available
-- [ ] Languages — installed locales
+- [x] **Boots** — the journal’s boot records via `journalctl`
+- [x] **Languages** — active locale, system default, installed locales
 - [x] **Memory Usage** — `/proc/meminfo`, `/proc/sys/vm`
 - [x] **Filesystems** — `/proc/self/mounts`, `statvfs`
-- [ ] Display — Wayland/X11 outputs, DRM connectors from `/sys/class/drm`
-- [ ] Environment Variables
-- [ ] Development — toolchain versions present on `PATH`
-- [ ] Users / Groups — `/etc/passwd`, `/etc/group`
+- [x] **Display** — session type, compositor, active outputs, backlight
+- [x] **Environment Variables** — with credential-shaped values redacted
+- [x] **Development** — toolchain versions, probing only what is installed
+- [x] **Users** / **Groups** — `/etc/passwd`, `/etc/group`, primary groups resolved
 
 ### Devices
 
 - [x] **Processor** — `/proc/cpuinfo`, cache and topology from `/sys`, CPUID for hypervisor identity
-- [ ] Graphics Processors — `/sys/class/drm`, PCI class match; `nvml-wrapper` for NVIDIA detail
-- [ ] Monitors — DRM connectors plus EDID parsing from `/sys/class/drm/*/edid`
+- [x] **Graphics Processors** — DRM cards, connectors, OpenGL renderer via `glxinfo`
+- [x] **Monitors** — DRM connectors with full EDID decoding
 - [x] **PCI Devices** — `/sys/bus/pci`, names via `lspci` when installed
 - [x] **USB Devices** — `/sys/bus/usb` as a port tree, names via `lsusb` when needed
 - [x] **Firmware** — UEFI, Secure Boot via efivarfs, TPM version and PCR banks
-- [ ] Printers — CUPS over IPP
+- [x] **Printers** — CUPS queues via `lpstat`
 - [x] **Battery** — `/sys/class/power_supply`, including wear against design capacity
 - [x] **Sensors** — `/sys/class/hwmon` (temperature, fan, voltage, current, power)
-- [ ] Input Devices — `/proc/bus/input/devices`
+- [x] **Input Devices** — `/proc/bus/input/devices`, class and bound driver
 - [x] **Storage** — `/sys/block`, partition use through LUKS/LVM, SMART via `smartctl`
 - [x] **System DMI** — SMBIOS identity tables from `/sys/class/dmi/id`
-- [ ] Memory Devices — SPD / SMBIOS type 17 entries
-- [ ] Device Tree — `/proc/device-tree` (ARM, RISC-V)
-- [ ] Resources — `/proc/ioports`, `/proc/interrupts`, `/proc/dma`
+- [x] **Memory Devices** — SPD decoded from EEPROM, unprivileged
+- [x] **Device Tree** — `/proc/device-tree`, distinguishing a real tree from an EFI stub
+- [x] **Resources** — interrupts, I/O ports, memory ranges, DMA
 
 ### Network
 
 - [x] **Interfaces** — `/sys/class/net`, addresses via `ip -j` with an IPv6 fallback
-- [ ] IP Connections — `/proc/net/{tcp,tcp6,udp,udp6}`
-- [ ] Routing Table / ARP Table — netlink, or `/proc/net/route` and `/proc/net/arp`
-- [ ] DNS Servers — `/etc/resolv.conf`, `resolvectl`
-- [ ] Statistics — `/proc/net/dev`, sampled for rates
-- [ ] Shared Directories — Samba and NFS exports
+- [x] **IP Connections** — `/proc/net/{tcp,udp}`, grouped by socket state
+- [x] **Routing Table** / **ARP Table** — `/proc/net/route`, `ipv6_route`, `arp`
+- [x] **DNS Servers** — `resolv.conf`, with stub-resolver detection
+- [x] **Statistics** — `/proc/net/dev` and per-protocol counters from `snmp`
+- [x] **Shared Directories** — NFS exports and Samba shares
 
 ### Benchmarks
 

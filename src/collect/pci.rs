@@ -164,12 +164,12 @@ fn strip_hex(value: &str) -> String {
 
 /// Names for one device, as reported by lspci.
 #[derive(Default)]
-struct DeviceNames {
-    class: String,
-    vendor: String,
-    device: String,
-    subsystem_vendor: Option<String>,
-    subsystem_device: Option<String>,
+pub struct DeviceNames {
+    pub class: String,
+    pub vendor: String,
+    pub device: String,
+    pub subsystem_vendor: Option<String>,
+    pub subsystem_device: Option<String>,
 }
 
 /// Ask lspci for human-readable names, keyed by full PCI address.
@@ -177,7 +177,7 @@ struct DeviceNames {
 /// `-vmm` is lspci's machine-readable format: `key:\tvalue` lines in
 /// blank-line-separated blocks, which is the same shape as /proc/cpuinfo.
 /// `-D` forces the domain into every address so the keys match sysfs.
-fn lspci_names() -> BTreeMap<String, DeviceNames> {
+pub fn lspci_names() -> BTreeMap<String, DeviceNames> {
     let Some(output) = probe::run("lspci", &["-vmm", "-D"]) else {
         return BTreeMap::new();
     };

@@ -14,7 +14,9 @@ use crate::app::{self, App, Focus, Row, SidebarItem};
 use crate::model::{Polarity, Value};
 use crate::sysfs;
 
-const SIDEBAR_WIDTH: u16 = 24;
+/// Wide enough for the longest page title ("Environment Variables") plus its
+/// indent, ordinal and borders.
+const SIDEBAR_WIDTH: u16 = 28;
 /// Clamp for the label column so a single long key cannot squeeze out values.
 const MAX_LABEL_WIDTH: usize = 38;
 
@@ -87,10 +89,13 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
                 } else {
                     "  ".to_string()
                 };
+                // Clip with an ellipsis rather than letting the pane cut a
+                // word mid-character on a narrow terminal.
+                let room = area.width.saturating_sub(6) as usize;
                 let mut spans = vec![
                     Span::raw("  "),
                     Span::styled(key, dim()),
-                    Span::raw(page.title()),
+                    Span::raw(ellipsise(page.title(), room)),
                 ];
                 if page.error.is_some() {
                     spans.push(Span::styled(" !", Style::default().fg(Color::Red)));
@@ -317,6 +322,17 @@ fn gauge_spans(
     ]
 }
 
+/// Shorten `text` to `width` columns, marking that it was cut.
+fn ellipsise(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width <= 1 {
+        return "…".repeat(width);
+    }
+    text.chars().take(width - 1).chain(['…']).collect()
+}
+
 /// Greedy word wrap, hard-breaking any single word longer than `width`.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     if text.chars().count() <= width {
@@ -487,6 +503,36 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_titles_are_marked_as_clipped() {
+        assert_eq!(ellipsise("Summary", 20), "Summary");
+        // The failure this fixes: "Environment Variab" read as a real name.
+        assert_eq!(ellipsise("Environment Variables", 10), "Environme…");
+        assert_eq!(
+            ellipsise("Environment Variables", 21),
+            "Environment Variables"
+        );
+        // Degenerate widths must not panic.
+        assert_eq!(ellipsise("Summary", 1), "…");
+        assert_eq!(ellipsise("Summary", 0), "");
+    }
+
+    #[test]
+    fn every_page_title_fits_the_sidebar() {
+        // The sidebar is sized for the longest title; if a new page exceeds
+        // it, widen SIDEBAR_WIDTH rather than shipping a clipped label.
+        let app = App::new();
+        let room = SIDEBAR_WIDTH as usize - 6;
+        for page in &app.pages {
+            assert!(
+                page.title().chars().count() <= room,
+                "{:?} needs {} columns, sidebar allows {room}",
+                page.title(),
+                page.title().chars().count()
+            );
+        }
+    }
 
     #[test]
     fn wraps_on_word_boundaries() {

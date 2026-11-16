@@ -11,17 +11,38 @@ use anyhow::Result;
 
 use crate::model::Node;
 
+pub mod accounts;
 pub mod battery;
+pub mod boots;
+pub mod connections;
 pub mod cpu;
+pub mod development;
+pub mod devicetree;
+pub mod display;
 pub mod dmi;
+pub mod dns;
+pub mod edid;
+pub mod environment;
 pub mod filesystems;
 pub mod firmware;
+pub mod gpu;
+pub mod input;
 pub mod interfaces;
+pub mod locales;
 pub mod memory;
+pub mod memory_devices;
 pub mod modules;
+pub mod monitors;
+pub mod netstat;
+pub mod netutil;
+pub mod os;
 pub mod pci;
+pub mod printers;
+pub mod resources;
+pub mod routes;
 pub mod security;
 pub mod sensors;
+pub mod shares;
 pub mod storage;
 pub mod summary;
 pub mod usb;
@@ -87,19 +108,40 @@ pub trait Collector {
 pub fn registry() -> Vec<Box<dyn Collector>> {
     let mut collectors: Vec<Box<dyn Collector>> = vec![
         Box::new(summary::Summary),
+        Box::new(os::OperatingSystem),
         Box::new(memory::Memory),
         Box::new(filesystems::Filesystems),
         Box::new(modules::Modules),
+        Box::new(boots::Boots),
+        Box::new(development::Development),
         Box::new(security::Security),
+        Box::new(locales::Locales),
+        Box::new(environment::Environment),
+        Box::new(accounts::Users),
+        Box::new(accounts::Groups),
+        Box::new(display::Display),
         Box::new(cpu::Cpu),
         Box::new(pci::Pci),
         Box::new(usb::Usb),
         Box::new(storage::Storage),
         Box::new(dmi::Dmi),
         Box::new(firmware::Firmware),
+        Box::new(gpu::Gpu),
+        Box::new(monitors::Monitors),
+        Box::new(input::Input),
+        Box::new(printers::Printers),
+        Box::new(memory_devices::MemoryDevices),
+        Box::new(devicetree::DeviceTree),
+        Box::new(resources::Resources),
         Box::new(sensors::Sensors),
         Box::new(battery::Battery),
         Box::new(interfaces::Interfaces),
+        Box::new(connections::Connections),
+        Box::new(routes::Routes),
+        Box::new(routes::Arp),
+        Box::new(dns::Dns),
+        Box::new(netstat::NetStat),
+        Box::new(shares::Shares),
     ];
     collectors.sort_by_key(|c| Group::ALL.iter().position(|g| *g == c.group()));
     collectors

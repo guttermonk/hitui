@@ -9,12 +9,12 @@
 //! every link and its IPv6 addresses.
 
 use std::collections::BTreeMap;
-use std::net::Ipv6Addr;
 use std::path::Path;
 
 use anyhow::Result;
 use serde_json::Value as Json;
 
+use crate::collect::netutil;
 use crate::collect::{Collector, Group};
 use crate::model::{Node, Value};
 use crate::probe;
@@ -258,7 +258,7 @@ fn inet6_addresses() -> BTreeMap<String, Vec<Address>> {
         if fields.len() < 6 {
             continue;
         }
-        let Some(address) = parse_packed_ipv6(fields[0]) else {
+        let Some(address) = netutil::ipv6_raw(fields[0]) else {
             continue;
         };
         let prefix = u32::from_str_radix(fields[2], 16).unwrap_or(0);
@@ -280,38 +280,9 @@ fn inet6_addresses() -> BTreeMap<String, Vec<Address>> {
     by_interface
 }
 
-/// Expand the 32-hex-digit form /proc uses into a normal IPv6 address.
-fn parse_packed_ipv6(packed: &str) -> Option<Ipv6Addr> {
-    if packed.len() != 32 {
-        return None;
-    }
-    let mut segments = [0u16; 8];
-    for (i, segment) in segments.iter_mut().enumerate() {
-        *segment = u16::from_str_radix(packed.get(i * 4..i * 4 + 4)?, 16).ok()?;
-    }
-    Some(Ipv6Addr::from(segments))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn expands_packed_ipv6() {
-        assert_eq!(
-            parse_packed_ipv6("00000000000000000000000000000001").unwrap(),
-            Ipv6Addr::LOCALHOST
-        );
-        assert_eq!(
-            parse_packed_ipv6("fe80000000000000eb8c658f52de1b08")
-                .unwrap()
-                .to_string(),
-            "fe80::eb8c:658f:52de:1b08"
-        );
-        // Wrong length is malformed input, not a zero address.
-        assert!(parse_packed_ipv6("fe80").is_none());
-        assert!(parse_packed_ipv6("").is_none());
-    }
 
     #[test]
     fn reads_ipv6_from_proc_as_a_fallback() {

@@ -64,6 +64,16 @@ pub fn run(program: &str, args: &[&str]) -> Option<String> {
 
     let mut child = Command::new(path)
         .args(args)
+        // Several tools colour their output when these say to, regardless of
+        // whether stdout is a terminal. `journalctl` with SYSTEMD_COLORS set
+        // emits escape sequences into its own JSON, which then fails to parse.
+        .env("NO_COLOR", "1")
+        .env("SYSTEMD_COLORS", "0")
+        .env("CLICOLOR", "0")
+        .env("TERM", "dumb")
+        // A tool that localises its output would break every string match
+        // here, so ask for the C locale.
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -137,6 +147,15 @@ mod tests {
         // 256 KiB comfortably exceeds the 64 KiB default pipe capacity.
         let output = run("sh", &["-c", "yes abcdefgh | head -c 262144"]).expect("sh should run");
         assert_eq!(output.len(), 262_144);
+    }
+
+    #[test]
+    fn colour_and_locale_are_forced_off_for_the_child() {
+        // The bug this guards: journalctl honours SYSTEMD_COLORS even when
+        // piped, putting escape sequences inside its JSON output.
+        let env =
+            run("sh", &["-c", "echo $NO_COLOR:$SYSTEMD_COLORS:$LC_ALL"]).expect("sh should run");
+        assert_eq!(env.trim(), "1:0:C");
     }
 
     #[test]

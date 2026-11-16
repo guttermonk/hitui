@@ -241,6 +241,47 @@ fn plural(n: u64) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+/// Format a Unix timestamp as `YYYY-MM-DD HH:MM UTC`.
+///
+/// UTC only, and no dependency on a date library: the civil-calendar
+/// conversion is a dozen lines, where a time crate would be the heaviest
+/// thing in the build.
+pub fn format_timestamp(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let time = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute) = (time / 3600, (time % 3600) / 60);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+/// Days since the Unix epoch to a civil `(year, month, day)`.
+///
+/// Howard Hinnant's `civil_from_days`, shifting the era to start in March so
+/// that the leap day falls at the end of a year and needs no special case.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    // Re-base from 1970-01-01 to 0000-03-01.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = (z - era * 146_097) as u64; // [0, 146096]
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era as i64 + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let march_month = (5 * day_of_year + 2) / 153; // [0, 11], 0 is March
+    let day = day_of_year - (153 * march_month + 2) / 5 + 1;
+    let month = if march_month < 10 {
+        march_month + 3
+    } else {
+        march_month - 9
+    };
+    // January and February belong to the following calendar year.
+    (
+        if month <= 2 { year + 1 } else { year },
+        month as u32,
+        day as u32,
+    )
+}
+
 /// Binary prefixes, as every other system tool reports memory and storage.
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
@@ -306,6 +347,19 @@ mod tests {
             panic!("expected a gauge");
         };
         assert_eq!(percent, 0.0);
+    }
+
+    #[test]
+    fn formats_timestamps_without_a_date_library() {
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00 UTC");
+        // A leap day, which is where naive calendar maths goes wrong.
+        assert_eq!(format_timestamp(951_782_400), "2000-02-29 00:00 UTC");
+        assert_eq!(format_timestamp(1_000_000_000), "2001-09-09 01:46 UTC");
+        // End of a year, and the start of the next.
+        assert_eq!(format_timestamp(1_767_225_540), "2025-12-31 23:59 UTC");
+        assert_eq!(format_timestamp(1_767_225_600), "2026-01-01 00:00 UTC");
+        // Before the epoch must not wrap into the future.
+        assert_eq!(format_timestamp(-1), "1969-12-31 23:59 UTC");
     }
 
     #[test]
