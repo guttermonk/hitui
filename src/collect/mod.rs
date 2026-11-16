@@ -13,9 +13,14 @@ use crate::model::Node;
 
 pub mod battery;
 pub mod cpu;
+pub mod dmi;
 pub mod filesystems;
+pub mod firmware;
+pub mod interfaces;
 pub mod memory;
+pub mod modules;
 pub mod pci;
+pub mod security;
 pub mod sensors;
 pub mod storage;
 pub mod summary;
@@ -84,12 +89,17 @@ pub fn registry() -> Vec<Box<dyn Collector>> {
         Box::new(summary::Summary),
         Box::new(memory::Memory),
         Box::new(filesystems::Filesystems),
+        Box::new(modules::Modules),
+        Box::new(security::Security),
         Box::new(cpu::Cpu),
         Box::new(pci::Pci),
         Box::new(usb::Usb),
         Box::new(storage::Storage),
+        Box::new(dmi::Dmi),
+        Box::new(firmware::Firmware),
         Box::new(sensors::Sensors),
         Box::new(battery::Battery),
+        Box::new(interfaces::Interfaces),
     ];
     collectors.sort_by_key(|c| Group::ALL.iter().position(|g| *g == c.group()));
     collectors

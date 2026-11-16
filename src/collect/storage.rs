@@ -44,13 +44,24 @@ impl Collector for Storage {
         let devices = devices();
         let usage = Usage::read();
 
+        // Query each drive exactly once. smartctl talks to the hardware, so
+        // asking twice — once for the summary line, once for the health
+        // section — is a real cost, not just a duplicated function call.
+        let mut reports: BTreeMap<String, Smart> = devices
+            .iter()
+            .map(|name| (name.clone(), smart(name)))
+            .collect();
+
         let mut overview = Node::group("Storage", vec![]);
         overview.push(Node::field("Devices", devices.len()));
-        overview.push(Node::field("Drive health", smart_availability(&devices)));
+        overview.push(Node::field(
+            "Drive health",
+            smart_availability(reports.values().next()),
+        ));
 
         let mut nodes = vec![overview];
         for name in &devices {
-            nodes.push(device(name, &usage));
+            nodes.push(device(name, &usage, reports.remove(name)));
         }
         Ok(nodes)
     }
@@ -121,13 +132,14 @@ fn swap_devices() -> BTreeSet<String> {
 }
 
 /// One line explaining whether health data could be read, and why not.
-fn smart_availability(devices: &[String]) -> &'static str {
+///
+/// Judged from one drive's outcome rather than reported per-drive: the usual
+/// answer is uniform because it is a permission question, not a device one.
+fn smart_availability(sample: Option<&Smart>) -> &'static str {
     if !probe::available("smartctl") {
         return "unavailable — install smartmontools for drive health";
     }
-    // Probe the first device rather than reporting per-drive: the usual
-    // outcome is uniform, and it is a permission question not a device one.
-    match devices.first().map(|name| smart(name)) {
+    match sample {
         Some(Smart::Ok(_)) => "read by smartctl",
         Some(Smart::Denied) => "unavailable — smartctl needs root for this drive",
         Some(Smart::Failed) => "unavailable — smartctl could not read this drive",
@@ -135,7 +147,7 @@ fn smart_availability(devices: &[String]) -> &'static str {
     }
 }
 
-fn device(name: &str, usage: &Usage) -> Node {
+fn device(name: &str, usage: &Usage, report: Option<Smart>) -> Node {
     let dir = Path::new("/sys/block").join(name);
     let trimmed = |file: &str| {
         sysfs::read(dir.join(file))
@@ -186,7 +198,7 @@ fn device(name: &str, usage: &Usage) -> Node {
     if let Some(partitions) = partitions(&dir, usage) {
         node.push(partitions);
     }
-    if let Smart::Ok(report) = smart(name) {
+    if let Some(Smart::Ok(report)) = report {
         node.push(health(&report).from("smartctl"));
     }
     node
@@ -709,10 +721,25 @@ mod tests {
     fn says_why_health_is_missing() {
         // On an unprivileged run this is the permission message; the point is
         // that it is never silently absent.
-        let message = smart_availability(&devices());
+        let sample = devices().first().map(|name| smart(name));
+        let message = smart_availability(sample.as_ref());
         assert!(!message.is_empty());
         if !probe::available("smartctl") {
             assert!(message.contains("smartmontools"), "should name the package");
+        }
+    }
+
+    #[test]
+    fn each_drive_is_queried_once() {
+        // smartctl talks to the hardware, so the summary line and the health
+        // section must share one report rather than each asking for their own.
+        let nodes = Storage.collect().expect("collection failed");
+        assert_eq!(nodes.len(), devices().len() + 1);
+
+        // A drive either has exactly one health section or none at all.
+        for node in nodes.iter().skip(1) {
+            let health_sections = node.children.iter().filter(|c| c.label == "Health").count();
+            assert!(health_sections <= 1, "{} has duplicate health", node.label);
         }
     }
 }

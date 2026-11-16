@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+use crate::collect::dmi;
 use crate::collect::{Collector, Group};
 use crate::model::{Node, Value, format_bytes, format_duration};
 use crate::sysfs;
@@ -67,59 +68,26 @@ fn system() -> Node {
 /// ("ThinkPad P51") while `product_name` is the bare model code, so prefer it
 /// and fall back the other way for vendors that leave it empty.
 fn machine_type() -> Option<String> {
-    const DMI: &str = "/sys/class/dmi/id";
-
-    let vendor = sysfs::read(format!("{DMI}/sys_vendor"));
-    let model = sysfs::read(format!("{DMI}/product_version"))
-        .filter(|v| !v.is_empty() && !is_dmi_placeholder(v))
-        .or_else(|| sysfs::read(format!("{DMI}/product_name")));
-
-    let mut parts: Vec<String> = [vendor, model]
+    // `product_version` carries the marketing name on Lenovo machines;
+    // `product_name` is the bare model code. The full tables are on the
+    // System DMI page, which also owns the placeholder filtering.
+    let model = dmi::field("product_version").or_else(|| dmi::field("product_name"));
+    let mut parts: Vec<String> = [dmi::field("sys_vendor"), model]
         .into_iter()
         .flatten()
-        .filter(|p| !p.is_empty() && !is_dmi_placeholder(p))
         .collect();
+
     if parts.is_empty() {
-        // Boards without DMI (most ARM) describe themselves in the device tree.
+        // Boards without SMBIOS (most ARM) describe themselves in the device
+        // tree instead.
         return sysfs::read("/proc/device-tree/model");
     }
-
-    if let Some(chassis) = sysfs::read_u64(format!("{DMI}/chassis_type")).and_then(chassis_name) {
+    if let Some(chassis) =
+        sysfs::read_u64("/sys/class/dmi/id/chassis_type").and_then(dmi::chassis_type)
+    {
         parts.push(format!("({chassis})"));
     }
     Some(parts.join(" "))
-}
-
-/// Firmware that was never filled in at the factory.
-fn is_dmi_placeholder(value: &str) -> bool {
-    const PLACEHOLDERS: [&str; 6] = [
-        "To be filled by O.E.M.",
-        "To Be Filled By O.E.M.",
-        "System Product Name",
-        "System manufacturer",
-        "Default string",
-        "None",
-    ];
-    PLACEHOLDERS.iter().any(|p| p.eq_ignore_ascii_case(value))
-}
-
-/// SMBIOS chassis types (spec table 7.4.1), abridged to the ones seen in life.
-fn chassis_name(code: u64) -> Option<&'static str> {
-    Some(match code {
-        3 | 4 | 6 | 7 | 15 => "Desktop",
-        8 | 9 | 10 | 14 => "Notebook",
-        11 => "Handheld",
-        13 => "All-in-one",
-        17 | 23 | 28 | 29 => "Server",
-        24 => "Sealed-case PC",
-        30 => "Tablet",
-        31 | 32 => "Convertible",
-        34 => "Embedded PC",
-        35 => "Mini PC",
-        36 => "Stick PC",
-        // 1 Other and 2 Unknown carry no information worth printing.
-        _ => return None,
-    })
 }
 
 fn os_release(key: &str) -> Option<String> {
@@ -318,10 +286,13 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_dmi_strings_are_rejected() {
-        assert!(is_dmi_placeholder("To be filled by O.E.M."));
-        assert!(is_dmi_placeholder("Default string"));
-        assert!(!is_dmi_placeholder("ThinkPad P51"));
+    fn machine_type_is_free_of_firmware_placeholders() {
+        if let Some(machine) = machine_type() {
+            assert!(!machine.is_empty());
+            for part in machine.split_whitespace() {
+                assert!(!dmi::is_placeholder(part), "placeholder leaked: {machine}");
+            }
+        }
     }
 
     #[test]

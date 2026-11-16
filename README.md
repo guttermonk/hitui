@@ -7,8 +7,8 @@ Reads the kernel's own interfaces (`/proc`, `/sys`) rather than shelling out to
 other tools, renders them in a two-pane browser, and can dump the whole report
 as JSON for scripting.
 
-**Status:** early. The data model, navigation, search, external-tool layer and
-report pipeline are in place, with nine working pages. Remaining pages are
+**Status:** usable. The data model, navigation, search, external-tool layer and
+report pipeline are in place, with fourteen working pages. Remaining pages are
 listed under [Pages](#pages); the roadmap is hardinfo2 parity first, then the
 breadth `inxi` covers, then firmware and security state.
 
@@ -137,18 +137,24 @@ be inspected rather than trusted. That is how the Storage page can distinguish
 Grouped as hardinfo2 groups them, so anyone coming from the GTK app finds
 things where they expect. Notes name the data source each page needs.
 
-Beyond parity, planned additions that hardinfo2 lacks: partition and
-LVM/RAID/LUKS topology, unmounted volumes, bluetooth and boot mode (the
-practical fields `inxi` carries), and a firmware/security page covering Secure
-Boot state, TPM version, kernel lockdown, module signing, and IOMMU groups for
-VFIO passthrough.
+Beyond parity, still planned: bluetooth, package repositories, and RAID/LVM
+volume topology (the practical fields `inxi` carries). Already in, going
+further than hardinfo2: LUKS/LVM partition mapping and unmounted-volume
+reporting on Storage, decoded kernel taint flags, and the hardening and
+passthrough state on Security.
+
+A note on what is deliberately missing: **module descriptions.** They live in
+the `.ko` files, readable only by `modinfo`, and the cost is decompressing
+every module on disk — batching all 213 modules of a running kernel into one
+call still measured 32 seconds. That is a page that hangs. Adding them back
+needs background collection or an on-disk cache, not a longer timeout.
 
 ### Computer
 
 - [x] **Summary** — machine identity, installed hardware, capacity
 - [ ] Operating System — `/etc/os-release`, `uname`, uptime, init system
-- [ ] Security — SELinux/AppArmor status, lockdown, module signing
-- [ ] Kernel Modules — `/proc/modules`, `modinfo` equivalents
+- [x] **Security** — LSMs, lockdown, hardening sysctls, module signing, IOMMU/KVM
+- [x] **Kernel Modules** — `/proc/modules`, `/sys/module`, decoded taint flags
 - [ ] Boots — `wtmp`, or `journalctl --list-boots` where available
 - [ ] Languages — installed locales
 - [x] **Memory Usage** — `/proc/meminfo`, `/proc/sys/vm`
@@ -165,20 +171,20 @@ VFIO passthrough.
 - [ ] Monitors — DRM connectors plus EDID parsing from `/sys/class/drm/*/edid`
 - [x] **PCI Devices** — `/sys/bus/pci`, names via `lspci` when installed
 - [x] **USB Devices** — `/sys/bus/usb` as a port tree, names via `lsusb` when needed
-- [ ] Firmware — `/sys/firmware/efi`, Secure Boot state
+- [x] **Firmware** — UEFI, Secure Boot via efivarfs, TPM version and PCR banks
 - [ ] Printers — CUPS over IPP
 - [x] **Battery** — `/sys/class/power_supply`, including wear against design capacity
 - [x] **Sensors** — `/sys/class/hwmon` (temperature, fan, voltage, current, power)
 - [ ] Input Devices — `/proc/bus/input/devices`
 - [x] **Storage** — `/sys/block`, partition use through LUKS/LVM, SMART via `smartctl`
-- [ ] System DMI — SMBIOS via `smbios-lib` over `/sys/firmware/dmi/tables`
+- [x] **System DMI** — SMBIOS identity tables from `/sys/class/dmi/id`
 - [ ] Memory Devices — SPD / SMBIOS type 17 entries
 - [ ] Device Tree — `/proc/device-tree` (ARM, RISC-V)
 - [ ] Resources — `/proc/ioports`, `/proc/interrupts`, `/proc/dma`
 
 ### Network
 
-- [ ] Interfaces — `/sys/class/net`, addresses via netlink (`rtnetlink`)
+- [x] **Interfaces** — `/sys/class/net`, addresses via `ip -j` with an IPv6 fallback
 - [ ] IP Connections — `/proc/net/{tcp,tcp6,udp,udp6}`
 - [ ] Routing Table / ARP Table — netlink, or `/proc/net/route` and `/proc/net/arp`
 - [ ] DNS Servers — `/etc/resolv.conf`, `resolvectl`
