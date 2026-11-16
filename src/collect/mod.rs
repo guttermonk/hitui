@@ -50,6 +50,7 @@ pub mod shares;
 pub mod storage;
 pub mod summary;
 pub mod usb;
+pub mod volumes;
 
 /// Top-level sidebar grouping, mirroring hardinfo2's modules.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -142,6 +143,7 @@ pub fn registry() -> Vec<Box<dyn Collector>> {
         Box::new(pci::Pci),
         Box::new(usb::Usb),
         Box::new(storage::Storage),
+        Box::new(volumes::Volumes),
         Box::new(dmi::Dmi),
         Box::new(firmware::Firmware),
         Box::new(gpu::Gpu),

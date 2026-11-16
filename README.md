@@ -7,7 +7,7 @@ Reads the kernel's own interfaces (`/proc`, `/sys`) rather than shelling out to
 other tools, renders them in a two-pane browser, and can dump the whole report
 as JSON for scripting.
 
-**Status:** complete. All four of hardinfo2's modules are implemented — 38
+**Status:** complete. All four of hardinfo2's modules are implemented — 39
 pages across Computer, Devices, Network and Benchmarks. Several go further than
 the original; see [Pages](#pages).
 
@@ -334,6 +334,15 @@ Where hitui goes further than hardinfo2:
   sysctls as "1 — hidden from unprivileged users"; TCP state `0A` as `LISTEN`.
 - **Security** covers hardening sysctls, lockdown, module signing and
   IOMMU/passthrough readiness, which hardinfo2 does not report.
+- **Volumes render the stack as a stack.** A btrfs filesystem on a LUKS
+  mapping on a partition on an NVMe drive is four layers, and an LV on a VG on
+  a PV on a LUKS mapping is six; from either end that reads as a list of
+  unrelated block devices. Read entirely from sysfs, which matters here more
+  than elsewhere: `lvs` and `vgs` want `/dev/mapper/control` and report almost
+  nothing as an ordinary user, while `/sys/block/*/dm/uuid` identifies the same
+  volumes with no privilege at all. btrfs RAID profiles come from the
+  block-group flag word rather than `btrfs filesystem df`, so a filesystem with
+  data `single` and metadata `raid1` says which half survives one failure.
 - **Repositories answer "verified how", not just "where from"**. A repository
   is a list of things the machine will install as root, and the managers all
   spell the check differently — `gpgcheck`, `gpg-verify`, `Signed-By`,
@@ -354,7 +363,8 @@ Where hitui goes further than hardinfo2:
   behind", and it is how this machine's UEFI dbx turned out to be four
   revocation lists out of date. hardinfo2 reports the version and stops.
 
-Still planned beyond parity: RAID/LVM volume topology.
+Nothing is outstanding beyond parity. Two things stay deliberately out of
+scope; see [Not in scope](#not-in-scope) and the Benchmarks notes.
 
 Two deliberate omissions:
 
@@ -401,6 +411,7 @@ the secret in a paste.
 - [x] **Sensors** — `/sys/class/hwmon` (temperature, fan, voltage, current, power)
 - [x] **Input Devices** — `/proc/bus/input/devices`, class and bound driver
 - [x] **Storage** — `/sys/block`, partition use through LUKS/LVM, SMART via `smartctl`
+- [x] **Volumes** — MD arrays, LVM groups, btrfs profiles, and the full stack beneath each
 - [x] **System DMI** — SMBIOS identity tables from `/sys/class/dmi/id`
 - [x] **Memory Devices** — SPD decoded from EEPROM, unprivileged
 - [x] **Device Tree** — `/proc/device-tree`, distinguishing a real tree from an EFI stub

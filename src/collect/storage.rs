@@ -272,7 +272,10 @@ fn usage_of(partition: &Path, name: &str, usage: &Usage) -> String {
 }
 
 /// Classify a device-mapper target from its UUID prefix.
-fn mapping_kind(uuid: &str) -> &'static str {
+///
+/// Shared with the Volumes page, which classifies the same mappings from the
+/// other direction.
+pub(crate) fn mapping_kind(uuid: &str) -> &'static str {
     // dm encodes the subsystem in the UUID: CRYPT-LUKS2-…, LVM-…, mpath-….
     if uuid.starts_with("CRYPT-LUKS2") {
         "LUKS2"
