@@ -14,6 +14,7 @@ use crate::model::Node;
 pub mod accounts;
 pub mod battery;
 pub mod benchmarks;
+pub mod bluetooth;
 pub mod boots;
 pub mod connections;
 pub mod cpu;
@@ -144,6 +145,7 @@ pub fn registry() -> Vec<Box<dyn Collector>> {
         Box::new(gpu::Gpu),
         Box::new(monitors::Monitors),
         Box::new(input::Input),
+        Box::new(bluetooth::Bluetooth),
         Box::new(printers::Printers),
         Box::new(memory_devices::MemoryDevices),
         Box::new(devicetree::DeviceTree),

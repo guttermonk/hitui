@@ -7,7 +7,7 @@ Reads the kernel's own interfaces (`/proc`, `/sys`) rather than shelling out to
 other tools, renders them in a two-pane browser, and can dump the whole report
 as JSON for scripting.
 
-**Status:** complete. All four of hardinfo2's modules are implemented — 36
+**Status:** complete. All four of hardinfo2's modules are implemented — 37
 pages across Computer, Devices, Network and Benchmarks. Several go further than
 the original; see [Pages](#pages).
 
@@ -302,7 +302,7 @@ Three rules hold this together:
    beats a page that never draws.
 
 Optional tools in use or planned: `lspci`, `lsusb`, `smartctl`, `fwupdmgr`,
-`vulkaninfo`, `glxinfo`, `dmidecode`.
+`busctl`, `vulkaninfo`, `glxinfo`, `dmidecode`.
 
 Prefer a tool's structured output over its human-readable report where one
 exists. `smartctl --json` is parsed as JSON rather than scraped, which also
@@ -334,14 +334,19 @@ Where hitui goes further than hardinfo2:
   sysctls as "1 — hidden from unprivileged users"; TCP state `0A` as `LISTEN`.
 - **Security** covers hardening sysctls, lockdown, module signing and
   IOMMU/passthrough readiness, which hardinfo2 does not report.
+- **Bluetooth unpacks what BlueZ reports as numbers**: HCI version 8 as
+  "Bluetooth 4.2", the class of device 7078156 as "Computer / Laptop" plus the
+  services behind it, service UUIDs as profile names, and bluetoothd's own
+  version out of the virtual modalias it hides in. The radio's rfkill state is
+  read from the kernel, so a blocked adapter explains itself even when
+  bluetoothd is not running.
 - **Firmware says whether it is current**, not just which version is running:
   the installed build's release date, the newest build's name and date, and how
   many releases separate them. A version number alone cannot answer "am I
   behind", and it is how this machine's UEFI dbx turned out to be four
   revocation lists out of date. hardinfo2 reports the version and stops.
 
-Still planned beyond parity: bluetooth, package repositories, RAID/LVM volume
-topology.
+Still planned beyond parity: package repositories, RAID/LVM volume topology.
 
 Two deliberate omissions:
 
@@ -381,6 +386,7 @@ the secret in a paste.
 - [x] **USB Devices** — `/sys/bus/usb` as a port tree, names via `lsusb` when needed
 - [x] **Firmware** — UEFI, Secure Boot via efivarfs, TPM version and PCR banks,
       and firmware currency via `fwupdmgr`
+- [x] **Bluetooth** — adapters, paired devices and radio blocks, via BlueZ
 - [x] **Printers** — CUPS queues via `lpstat`
 - [x] **Battery** — `/sys/class/power_supply`, including wear against design capacity
 - [x] **Sensors** — `/sys/class/hwmon` (temperature, fan, voltage, current, power)

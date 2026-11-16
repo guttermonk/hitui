@@ -200,7 +200,11 @@ impl fmt::Display for Value {
             Value::Percent(p) => write!(f, "{p:.1} %"),
             Value::Flag(true) => f.write_str("yes"),
             Value::Flag(false) => f.write_str("no"),
-            Value::List(items) => f.write_str(&items.join(" ")),
+            // Comma-separated, not space-separated: the items are not always
+            // single words. "Audio sink (A2DP) Audio source (A2DP)" cannot be
+            // read back into two profiles, and the CPU flag list loses
+            // nothing by gaining separators.
+            Value::List(items) => f.write_str(&items.join(", ")),
             // Text fallbacks, used by the JSON report and by any renderer that
             // does not draw these as graphics.
             Value::Gauge {
