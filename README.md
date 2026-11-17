@@ -370,6 +370,13 @@ Where hitui goes further than hardinfo2:
   version out of the virtual modalias it hides in. The radio's rfkill state is
   read from the kernel, so a blocked adapter explains itself even when
   bluetoothd is not running.
+- **Security tokens report their applets and slots.** Which applications are
+  enabled, whether a FIDO2 PIN is set and how many attempts remain, and for
+  each slot-bearing applet either its slots or the specific reason it cannot be
+  read: `pcscd` not running, or an OTP hidraw node this user cannot open. Naming
+  the obstacle is the point — "needs pcscd" is actionable and a blank row is
+  not. Credentials are never enumerated, because that needs the device PIN and a
+  page reporting what a machine *is* must not ask for a secret.
 - **Security tokens are found by what they do, not who made them.** A USB
   device is a token if it declares a CCID interface or a HID interface whose
   report descriptor opens with usage page 0xF1D0, which the FIDO Alliance owns.

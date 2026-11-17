@@ -13,9 +13,10 @@
 //! SSD, the ME, the TPM and the Secure Boot certificates, and no token — so
 //! this reads USB sysfs directly and needs no daemon and no privilege.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::model::{Node, Value};
+use crate::probe;
 use crate::sysfs;
 
 const USB: &str = "/sys/bus/usb/devices";
@@ -44,10 +45,24 @@ pub fn section() -> Option<Node> {
         if roles.is_empty() {
             continue;
         }
-        node.push(token(&device, &roles));
+        node.push(token(&device, &roles, yubico_count(Path::new(USB))));
         found += 1;
     }
     (found > 0).then_some(node)
+}
+
+/// How many Yubico devices are plugged in, which decides whether `ykman` can
+/// be asked about one without a serial.
+fn yubico_count(root: &Path) -> usize {
+    sysfs::list_dir(root)
+        .iter()
+        .filter(|device| {
+            let name = file_name(device);
+            !name.contains(':')
+                && !name.starts_with("usb")
+                && sysfs::read(device.join("idVendor")).as_deref() == Some(YUBICO)
+        })
+        .count()
 }
 
 /// What makes this device a token, if anything does.
@@ -85,7 +100,7 @@ fn declares_fido(interface: &Path) -> bool {
     false
 }
 
-fn token(device: &Path, roles: &[&'static str]) -> Node {
+fn token(device: &Path, roles: &[&'static str], keys: usize) -> Node {
     let product = sysfs::read(device.join("product")).filter(|p| !p.is_empty());
     let vendor = sysfs::read(device.join("manufacturer")).filter(|v| !v.is_empty());
 
@@ -128,6 +143,9 @@ fn token(device: &Path, roles: &[&'static str]) -> Node {
         sysfs::read(device.join("serial")).filter(|s| !s.is_empty()),
     );
     node.push(Node::field("Port", file_name(device)));
+    for detail in yubikey(device, keys) {
+        node.push(detail);
+    }
     node
 }
 
@@ -162,6 +180,299 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+// ─── Vendor detail ───────────────────────────────────────────────────────────
+
+/// Yubico's USB vendor id.
+///
+/// The only vendor id in this module, and it gates a vendor *tool* rather than
+/// the detection above: reading a YubiKey's applets means speaking Yubico's
+/// protocols, and `ykman` is the implementation of them. A Nitrokey is still
+/// found and still reports its firmware; it just gets no applet breakdown,
+/// because nothing here can ask it for one.
+const YUBICO: &str = "1050";
+/// Where pcscd puts its socket. Its absence is the reason three of the four
+/// slot-bearing applets cannot be read, and saying which is more use than a
+/// blank row.
+const PCSCD_SOCKET: &str = "/run/pcscd/pcscd.comm";
+
+/// Applet and slot detail for a YubiKey, via `ykman`.
+///
+/// `keys` is how many Yubico devices are plugged in: with more than one,
+/// ykman needs a `--device <serial>` and nothing here can map a serial back to
+/// a USB port, so the detail is skipped rather than guessed at.
+fn yubikey(device: &Path, keys: usize) -> Vec<Node> {
+    if sysfs::read(device.join("idVendor")).as_deref() != Some(YUBICO) {
+        return Vec::new();
+    }
+    if keys > 1 {
+        return vec![Node::field(
+            "Applet detail",
+            "skipped — more than one YubiKey is plugged in, and ykman needs a serial to \
+             choose between them",
+        )];
+    }
+    if !probe::available("ykman") {
+        return vec![Node::field(
+            "Applet detail",
+            "unavailable — install yubikey-manager (ykman) for applet and slot state",
+        )];
+    }
+
+    let mut out = Vec::new();
+    if let Some(info) = probe::run("ykman", &["info"]) {
+        let fields = sysfs::parse_colon_pairs(&info);
+        let get = |key: &str| {
+            fields
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+                .filter(|value| !value.is_empty())
+        };
+        // The model, which the USB product string does not give: it says
+        // "YubiKey OTP+FIDO+CCID", the enabled interfaces, not "5 Nano".
+        let mut node = Node::group("YubiKey", vec![]).from("ykman");
+        node.push_opt("Model", get("Device type"));
+        node.push_opt("Form factor", get("Form factor"));
+        node.push_opt("Serial", get("Serial number"));
+        node.push_opt(
+            "USB interfaces",
+            get("Enabled USB interfaces")
+                .map(|v| Value::List(v.split(',').map(|part| part.trim().to_string()).collect())),
+        );
+
+        // Which applications are turned on at all. This is the coarse answer
+        // to "what is available": a disabled applet has no slots to speak of.
+        let applications = applications(&info);
+        if !applications.children.is_empty() {
+            node.push(applications);
+        }
+        out.push(node);
+    }
+
+    if let Some(fido) = probe::run("ykman", &["fido", "info"]) {
+        out.push(fido2(&fido));
+    }
+    out.push(slots(device));
+    out
+}
+
+/// The `Applications` block of `ykman info`: a name and a state per line,
+/// after a bare "Applications" heading.
+fn applications(info: &str) -> Node {
+    let mut node = Node::group("Applications", vec![]);
+    let mut inside = false;
+    for line in info.lines() {
+        let line = line.trim_end();
+        if line.trim() == "Applications" {
+            inside = true;
+            continue;
+        }
+        if !inside || line.trim().is_empty() {
+            continue;
+        }
+        // Name and state are column-aligned with tabs or runs of spaces, and
+        // the name itself contains spaces ("Yubico OTP", "YubiHSM Auth"), so
+        // the split is on the gap rather than on whitespace.
+        let Some((name, state)) = split_columns(line) else {
+            continue;
+        };
+        node.push(Node::field(name, state.to_ascii_lowercase()));
+    }
+    node
+}
+
+/// Split a column-aligned line on its gap: two or more spaces, or a tab.
+fn split_columns(line: &str) -> Option<(&str, &str)> {
+    let bytes = line.as_bytes();
+    for index in 0..bytes.len() {
+        let gap =
+            bytes[index] == b'\t' || (bytes[index] == b' ' && bytes.get(index + 1) == Some(&b' '));
+        if gap {
+            let name = line[..index].trim();
+            let state = line[index..].trim();
+            if !name.is_empty() && !state.is_empty() {
+                return Some((name, state));
+            }
+        }
+    }
+    None
+}
+
+/// FIDO2 state, which has no numbered slots to report.
+///
+/// Worth being explicit about, because "slot" is the word people reach for
+/// here and FIDO2 does not have them: a credential is discoverable or it is
+/// not, and the device has a capacity rather than an array of positions. What
+/// it does have is a PIN, and whether one is set is the fact that matters —
+/// a key with no PIN will hand over a resident credential to anyone holding
+/// it.
+///
+/// Listing the credentials themselves needs the PIN, so it is not attempted:
+/// a page that reports what a machine *is* must never ask for a secret.
+fn fido2(info: &str) -> Node {
+    let fields = sysfs::parse_colon_pairs(info);
+    let get = |key: &str| {
+        fields
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+            .filter(|value| !value.is_empty())
+    };
+
+    let mut node = Node::group("FIDO2", vec![]).from("ykman");
+    node.push(Node::field(
+        "PIN",
+        match get("PIN") {
+            // ykman phrases this as "8 attempt(s) remaining" when a PIN is
+            // set and "not set" when it is not.
+            Some(state) if state.contains("not set") => {
+                "not set — a resident credential on this key is usable by anyone holding it"
+                    .to_string()
+            }
+            Some(state) => format!("set, {state}"),
+            None => "unknown".to_string(),
+        },
+    ));
+    node.push_opt(
+        "Minimum PIN length",
+        get("Minimum PIN length").map(|n| format!("{n} characters")),
+    );
+    node.push_opt("AAGUID", get("AAGUID"));
+    node.push(Node::field(
+        "Credentials",
+        "not listed — the device requires its PIN to enumerate them",
+    ));
+    node
+}
+
+/// The applets that do have numbered slots, and what each needs to be read.
+///
+/// Every one of these is behind an interface that an ordinary user does not
+/// get by default, so the common case is that none can be read. Naming the
+/// specific obstacle per applet is the whole value of the section in that
+/// state: "needs pcscd" is actionable and a blank row is not.
+fn slots(device: &Path) -> Node {
+    let mut node = Node::group("Slots", vec![]);
+
+    // Yubico OTP: two slots, short press and long press, spoken over HID on
+    // the interface whose hidraw node gets no uaccess tag without Yubico's
+    // udev rules. The FIDO interface gets one from systemd, which is why that
+    // applet reads and this one does not.
+    //
+    // Checked by looking at the node rather than by trying and failing: the
+    // attempt costs 0.4 s of someone's page load to learn what a permission
+    // bit already said, and the node's own name is a better answer than
+    // "unreadable" on its own.
+    node.push(Node::field(
+        "Yubico OTP",
+        match otp_hidraw(device) {
+            Some(node) if !readable(&node) => format!(
+                "2 slots — unreadable: {} is not readable by this user; Yubico's udev rules \
+                 grant it",
+                node.display()
+            ),
+            _ => match probe::run("ykman", &["otp", "info"]) {
+                Some(output) => otp_slots(&output),
+                None => "2 slots — unreadable: ykman could not reach the OTP applet".to_string(),
+            },
+        },
+    ));
+
+    // PIV, OATH and OpenPGP all speak CCID, which goes through pcscd.
+    let smartcard = if Path::new(PCSCD_SOCKET).exists() {
+        None
+    } else {
+        Some("unreadable: pcscd is not running")
+    };
+    for (applet, arguments, count) in [
+        ("PIV", ["piv", "info"], "4 slots (9a, 9c, 9d, 9e)"),
+        ("OATH", ["oath", "info"], "credential slots"),
+        ("OpenPGP", ["openpgp", "info"], "3 key slots"),
+    ] {
+        node.push(Node::field(
+            applet,
+            match smartcard {
+                Some(reason) => format!("{count} — {reason}"),
+                None => match probe::run("ykman", &arguments) {
+                    Some(output) => populated(&output, count),
+                    None => format!("{count} — unreadable: ykman could not reach the applet"),
+                },
+            },
+        ));
+    }
+    node
+}
+
+/// The hidraw node of the OTP interface, if the device has one.
+///
+/// The OTP applet is a HID keyboard — class 3, boot subclass 1 — which is how
+/// it types a one-time password into whatever has focus. The FIDO interface on
+/// the same device is class 3 subclass 0, so the subclass is what tells them
+/// apart.
+fn otp_hidraw(device: &Path) -> Option<PathBuf> {
+    let name = file_name(device);
+    for interface in sysfs::list_dir(device) {
+        if !file_name(&interface).starts_with(&format!("{name}:")) {
+            continue;
+        }
+        if sysfs::read(interface.join("bInterfaceClass")).as_deref() != Some(HID_CLASS)
+            || sysfs::read(interface.join("bInterfaceSubClass")).as_deref() != Some("01")
+        {
+            continue;
+        }
+        for entry in sysfs::list_dir(&interface) {
+            // One hidraw node per HID interface, so the first is the only.
+            if let Some(hidraw) = sysfs::list_dir(entry.join("hidraw")).first() {
+                return Some(Path::new("/dev").join(file_name(hidraw)));
+            }
+        }
+    }
+    None
+}
+
+fn readable(node: &Path) -> bool {
+    std::fs::File::open(node).is_ok()
+}
+
+/// `ykman otp info` reports one line per slot.
+fn otp_slots(output: &str) -> String {
+    let slots: Vec<String> = output
+        .lines()
+        .filter_map(split_columns_colon)
+        .filter(|(name, _)| name.starts_with("Slot"))
+        .map(|(name, state)| format!("{name} {state}"))
+        .collect();
+    if slots.is_empty() {
+        return "2 slots — ykman reported no slot state".to_string();
+    }
+    slots.join(", ")
+}
+
+/// Which slots an applet's `info` output mentions as holding something.
+///
+/// Deliberately shallow: it reports the slot identifiers the output names and
+/// nothing about their contents. The formats differ between ykman releases,
+/// and a parser that finds nothing says so, where one that guessed at fields
+/// would report a key that is not there.
+fn populated(output: &str, count: &str) -> String {
+    let named: Vec<String> = output
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_suffix(':').or(Some(line)))
+        .filter(|line| line.starts_with("Slot "))
+        .map(|line| line.trim_end_matches(':').to_string())
+        .collect();
+    if named.is_empty() {
+        return format!("{count} — all empty");
+    }
+    format!("in use: {}", named.join(", "))
+}
+
+fn split_columns_colon(line: &str) -> Option<(&str, &str)> {
+    let (name, value) = line.split_once(':')?;
+    Some((name.trim(), value.trim()))
+}
+
 /// Exposed for the test, which builds a synthetic USB tree.
 #[cfg(test)]
 fn section_in(root: &Path) -> Option<Node> {
@@ -176,7 +487,7 @@ fn section_in(root: &Path) -> Option<Node> {
         if roles.is_empty() {
             continue;
         }
-        node.push(token(&device, &roles));
+        node.push(token(&device, &roles, yubico_count(root)));
         found += 1;
     }
     (found > 0).then_some(node)
@@ -185,7 +496,6 @@ fn section_in(root: &Path) -> Option<Node> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn write(path: PathBuf, contents: &[u8]) {
         if let Some(parent) = path.parent() {
@@ -324,6 +634,142 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Verbatim from `ykman info` on the key this was written against.
+    const YKMAN_INFO: &str = "Device type: YubiKey 5 Nano\n\
+         Serial number: 13166271\n\
+         Firmware version: 5.4.3\n\
+         Form factor: Nano (USB-A)\n\
+         Enabled USB interfaces: OTP, FIDO, CCID\n\
+         \n\
+         Applications\n\
+         Yubico OTP  \tEnabled\n\
+         FIDO U2F    \tEnabled\n\
+         FIDO2       \tEnabled\n\
+         OATH        \tEnabled\n\
+         PIV         \tEnabled\n\
+         OpenPGP     \tDisabled\n\
+         YubiHSM Auth\tEnabled\n";
+
+    /// Verbatim from `ykman fido info`.
+    const YKMAN_FIDO: &str = "AAGUID:             ee882879-721c-4913-9775-3dfcce97072a\n\
+         PIN:                8 attempt(s) remaining\n\
+         Minimum PIN length: 4\n";
+
+    #[test]
+    fn applications_are_read_with_their_state() {
+        // The coarse answer to "what is available": a disabled applet has no
+        // slots to speak of.
+        let node = applications(YKMAN_INFO);
+        assert_eq!(node.children.len(), 7, "all seven applets");
+        assert_eq!(field(&node, "Yubico OTP").as_deref(), Some("enabled"));
+        assert_eq!(field(&node, "OpenPGP").as_deref(), Some("disabled"));
+        // The names contain spaces, so the split is on the column gap and not
+        // on whitespace — "YubiHSM Auth" must not become "YubiHSM".
+        assert_eq!(field(&node, "YubiHSM Auth").as_deref(), Some("enabled"));
+    }
+
+    #[test]
+    fn a_column_gap_is_two_spaces_or_a_tab() {
+        assert_eq!(
+            split_columns("Yubico OTP  \tEnabled"),
+            Some(("Yubico OTP", "Enabled"))
+        );
+        assert_eq!(split_columns("PIV\tEnabled"), Some(("PIV", "Enabled")));
+        // A single space is inside a name, not between columns.
+        assert_eq!(split_columns("Yubico OTP"), None);
+        assert_eq!(split_columns(""), None);
+    }
+
+    #[test]
+    fn fido2_reports_whether_a_pin_is_set() {
+        let node = fido2(YKMAN_FIDO);
+        assert_eq!(
+            field(&node, "PIN").as_deref(),
+            Some("set, 8 attempt(s) remaining")
+        );
+        assert_eq!(
+            field(&node, "Minimum PIN length").as_deref(),
+            Some("4 characters")
+        );
+
+        // The state worth shouting about: with no PIN, a resident credential
+        // is usable by whoever is holding the key.
+        let node = fido2("PIN: not set\n");
+        let pin = field(&node, "PIN").expect("PIN is always stated");
+        assert!(pin.starts_with("not set"), "{pin}");
+        assert!(pin.contains("anyone holding it"), "{pin}");
+    }
+
+    #[test]
+    fn fido2_does_not_offer_to_enumerate_credentials() {
+        // Listing them needs the device's PIN, and a page that reports what a
+        // machine is must never ask for a secret.
+        let node = fido2(YKMAN_FIDO);
+        let credentials = field(&node, "Credentials").expect("the gap is named");
+        assert!(credentials.contains("requires its PIN"), "{credentials}");
+    }
+
+    #[test]
+    fn otp_slots_are_reported_per_slot() {
+        let reported = otp_slots("Slot 1: programmed\nSlot 2: empty\n");
+        assert_eq!(reported, "Slot 1 programmed, Slot 2 empty");
+
+        // A format this does not recognise says so rather than claiming two
+        // empty slots.
+        let reported = otp_slots("something else entirely\n");
+        assert!(reported.contains("no slot state"), "{reported}");
+    }
+
+    #[test]
+    fn an_unrecognised_applet_format_claims_nothing() {
+        // The formats differ between ykman releases. A parser that finds
+        // nothing must say so; one that guessed at fields would report a key
+        // that is not there.
+        assert_eq!(
+            populated("unexpected output\n", "4 slots"),
+            "4 slots — all empty"
+        );
+        assert_eq!(
+            populated("Slot 9A:\n  Algorithm: RSA2048\nSlot 9E:\n", "4 slots"),
+            "in use: Slot 9A, Slot 9E"
+        );
+    }
+
+    #[test]
+    fn a_non_yubico_token_gets_no_vendor_detail() {
+        // The detection is generic; this is not, and must not be run against
+        // a key whose protocols ykman cannot speak.
+        let root = fixture("nonyubico");
+        let device = device(&root, "1-7", &["03"], Some(0));
+        assert!(
+            yubikey(&device, 1).is_empty(),
+            "a non-Yubico key gets no ykman detail"
+        );
+        assert_eq!(yubico_count(&root), 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn two_keys_are_not_guessed_between() {
+        // ykman needs a --device serial with more than one plugged in, and
+        // nothing here can map a serial back to a USB port.
+        let root = fixture("twokeys");
+        let mut device = device(&root, "1-5", &["03"], Some(0));
+        write(device.join("idVendor"), b"1050\n");
+        device = device.clone();
+        let detail = yubikey(&device, 2);
+        assert_eq!(detail.len(), 1);
+        let text = detail[0]
+            .value
+            .as_ref()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        assert!(text.contains("more than one"), "{text}");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn field(node: &Node, label: &str) -> Option<String> {
