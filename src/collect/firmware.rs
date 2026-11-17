@@ -8,7 +8,7 @@
 use anyhow::Result;
 
 use crate::collect::{Collector, Group};
-use crate::collect::{dmi, fwupd};
+use crate::collect::{dmi, fwupd, tokens};
 use crate::model::{Node, Value};
 use crate::sysfs;
 
@@ -34,7 +34,13 @@ impl Collector for Firmware {
     fn collect(&mut self) -> Result<Vec<Node>> {
         // Updates come second: whether this firmware is current is the first
         // thing worth knowing after what it is.
-        let mut nodes = vec![platform(), fwupd::section(), secure_boot()];
+        let mut nodes = vec![platform(), fwupd::section()];
+        // Firmware that fwupd does not see. A GPU runs its own and nothing
+        // reports it; security tokens are absent from fwupd's device list
+        // entirely, so they are read from USB sysfs instead.
+        nodes.extend(graphics());
+        nodes.extend(tokens::section());
+        nodes.push(secure_boot());
         nodes.push(tpm());
         Ok(nodes)
     }
@@ -76,6 +82,77 @@ fn platform() -> Node {
     node.push_opt("Date", dmi::field("bios_date"));
     node.push_opt("EC firmware", dmi::field("ec_firmware_release"));
     node
+}
+
+/// Firmware the graphics hardware runs.
+///
+/// A GPU is a computer with its own firmware: a video BIOS at minimum, and on
+/// Intel parts the GuC and HuC microcontroller images the driver uploads at
+/// initialisation. Neither appears in fwupd's device list, and the GPU page
+/// reports what the card *is* rather than what it is running.
+///
+/// NVIDIA publishes the video BIOS version in `/proc`. i915 keeps its GuC,
+/// HuC and DMC versions in debugfs, which is root-only, so that is stated
+/// rather than left looking like a card with no firmware at all.
+fn graphics() -> Option<Node> {
+    let mut node = Node::group("Graphics firmware", vec![]);
+    let mut found = 0;
+
+    for gpu in sysfs::list_dir("/proc/driver/nvidia/gpus") {
+        let Some(information) = sysfs::read(gpu.join("information")) else {
+            continue;
+        };
+        let fields = sysfs::parse_colon_pairs(&information);
+        let get = |key: &str| {
+            fields
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+                .filter(|value| !value.is_empty())
+        };
+
+        let label = get("Model").unwrap_or_else(|| {
+            gpu.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "NVIDIA GPU".to_string())
+        });
+        let mut card = Node::group(label, vec![]).from("/proc/driver/nvidia");
+        card.push_opt("Video BIOS", get("Video BIOS"));
+        card.push_opt("Bus", get("Bus Location"));
+        node.push(card);
+        found += 1;
+    }
+
+    // Intel's firmware versions are behind debugfs. Saying so beats a card
+    // that looks like it runs none.
+    for card in sysfs::list_dir("/sys/class/drm") {
+        let driver = std::fs::canonicalize(card.join("device/driver"))
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            });
+        if driver.as_deref() != Some("i915") && driver.as_deref() != Some("xe") {
+            continue;
+        }
+        let name = card
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // Connectors are also drm devices; only the cards themselves matter.
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        let mut intel = Node::group(name, vec![]);
+        intel.push(Node::field(
+            "GuC and HuC",
+            "versions are in debugfs — needs root to read",
+        ));
+        node.push(intel);
+        found += 1;
+    }
+
+    (found > 0).then_some(node)
 }
 
 fn secure_boot() -> Node {
@@ -195,10 +272,33 @@ mod tests {
     fn collects_every_section() {
         let nodes = Firmware.collect().expect("collection failed");
         let labels: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            vec!["Platform", "Firmware updates", "Secure Boot", "TPM"]
-        );
+        // Two of the sections depend on the hardware: a machine with no
+        // discrete GPU and nothing plugged into it has no graphics firmware
+        // to report and no tokens to find. So the always-present ones are
+        // asserted by name and order, and the optional ones are allowed
+        // between them rather than pinned into a list that only matches the
+        // machine this was written on.
+        assert_eq!(labels.first(), Some(&"Platform"));
+        assert_eq!(labels.last(), Some(&"TPM"));
+        for required in ["Platform", "Firmware updates", "Secure Boot", "TPM"] {
+            assert!(labels.contains(&required), "{required} missing: {labels:?}");
+        }
+        let position = |label: &str| labels.iter().position(|l| *l == label);
+        assert!(position("Firmware updates") < position("Secure Boot"));
+        for label in &labels {
+            assert!(
+                [
+                    "Platform",
+                    "Firmware updates",
+                    "Graphics firmware",
+                    "Security tokens",
+                    "Secure Boot",
+                    "TPM",
+                ]
+                .contains(label),
+                "unexpected section {label:?}"
+            );
+        }
 
         for node in &nodes {
             assert!(!node.children.is_empty(), "{} is empty", node.label);

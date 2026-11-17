@@ -370,6 +370,18 @@ Where hitui goes further than hardinfo2:
   version out of the virtual modalias it hides in. The radio's rfkill state is
   read from the kernel, so a blocked adapter explains itself even when
   bluetoothd is not running.
+- **Security tokens are found by what they do, not who made them.** A USB
+  device is a token if it declares a CCID interface or a HID interface whose
+  report descriptor opens with usage page 0xF1D0, which the FIDO Alliance owns.
+  No vendor or product id appears in that code, so a Nitrokey, SoloKey, Feitian
+  or Titan is found by the same rule as a YubiKey — and the rule also turns up
+  a plain EMV smartcard reader, which is the point. fwupd does not list these
+  at all, so the firmware version comes from the USB device release, verified
+  against `ykman info` on the key this was written against.
+- **Graphics firmware is reported, which nothing else here did.** A GPU runs a
+  video BIOS of its own; NVIDIA publishes the version in `/proc`, and i915
+  keeps GuC and HuC behind debugfs, so that is said rather than left looking
+  like a card running no firmware.
 - **Firmware says whether it is current**, not just which version is running:
   the installed build's release date, the newest build's name and date, and how
   many releases separate them. A version number alone cannot answer "am I
@@ -416,8 +428,8 @@ the secret in a paste.
 - [x] **Monitors** — DRM connectors with full EDID decoding
 - [x] **PCI Devices** — `/sys/bus/pci`, names via `lspci` when installed
 - [x] **USB Devices** — `/sys/bus/usb` as a port tree, names via `lsusb` when needed
-- [x] **Firmware** — UEFI, Secure Boot via efivarfs, TPM version and PCR banks,
-      and firmware currency via `fwupdmgr`
+- [x] **Firmware** — UEFI, Secure Boot via efivarfs, TPM, graphics and security-token
+      firmware, and firmware currency via `fwupdmgr`
 - [x] **Bluetooth** — adapters, paired devices and radio blocks, via BlueZ
 - [x] **Printers** — CUPS queues via `lpstat`
 - [x] **Battery** — `/sys/class/power_supply`, including wear against design capacity

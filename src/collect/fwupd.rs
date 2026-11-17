@@ -131,7 +131,20 @@ fn build(report: &Report) -> Node {
 /// One device: what is installed, when it was released, and what is newer.
 fn device_node(device: &Json, report: &Report) -> Node {
     let name = string(device, "Name").unwrap_or_else(|| "Unknown device".to_string());
-    let mut node = Node::group(name, vec![]);
+    // Named by its maker as well as its model. fwupd reports the SSD as
+    // "MZVLB512HAJQ-000L7", which is the part number stamped on the chip and
+    // is not how anybody thinks of their own disk — the first report of this
+    // page was that it did not detect the SSD, when it had, under that.
+    let vendor = string(device, "Vendor");
+    let label = match &vendor {
+        Some(vendor) if !name.starts_with(vendor.as_str()) => format!("{vendor} {name}"),
+        _ => name.clone(),
+    };
+    let mut node = Node::group(label, vec![]);
+
+    // And says what kind of thing it is, which fwupd knows and the model
+    // number does not convey.
+    node.push_opt("Kind", string(device, "Summary"));
 
     let installed = string(device, "Version");
     node.push_opt("Installed", installed.clone());

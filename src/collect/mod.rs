@@ -49,6 +49,7 @@ pub mod sensors;
 pub mod shares;
 pub mod storage;
 pub mod summary;
+pub mod tokens;
 pub mod usb;
 pub mod volumes;
 
