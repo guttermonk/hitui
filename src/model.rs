@@ -95,6 +95,36 @@ pub enum Value {
         label: Option<String>,
         polarity: Polarity,
     },
+    /// A setting with a verdict attached: what it is set to, how that rates,
+    /// and what to set instead.
+    ///
+    /// Only emitted where there is something to do about it. A value that is
+    /// already right stays plain text, so colour always means "act on this"
+    /// rather than decorating every row that happens to be fine.
+    Verdict {
+        value: String,
+        severity: Severity,
+        /// What to change it to. Absent where the weakness is real but the
+        /// fix is not a value to write: a kernel built without a feature
+        /// cannot be configured into having it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        advice: Option<String>,
+    },
+}
+
+/// How bad a reported setting is.
+///
+/// Two levels and no "good". A correct value carries no severity at all, so
+/// that colour on a page always means there is something to act on — painting
+/// every correct row green would make a wall of colour in which the two rows
+/// that matter disappear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    /// Weaker than it could be.
+    Warn,
+    /// Wide open.
+    Danger,
 }
 
 /// Which end of a gauge is the bad end.
@@ -114,6 +144,24 @@ pub enum Polarity {
 
 impl Value {
     /// A gauge measuring consumption, where a full bar is bad.
+    /// A setting that is weaker than it could be.
+    pub fn warn(value: impl Into<String>, advice: impl Into<String>) -> Self {
+        Value::Verdict {
+            value: value.into(),
+            severity: Severity::Warn,
+            advice: Some(advice.into()),
+        }
+    }
+
+    /// A setting that is wide open.
+    pub fn danger(value: impl Into<String>, advice: impl Into<String>) -> Self {
+        Value::Verdict {
+            value: value.into(),
+            severity: Severity::Danger,
+            advice: Some(advice.into()),
+        }
+    }
+
     pub fn gauge(percent: f64, label: impl Into<String>) -> Self {
         Value::Gauge {
             percent,
@@ -204,6 +252,10 @@ impl fmt::Display for Value {
             // single words. "Audio sink (A2DP) Audio source (A2DP)" cannot be
             // read back into two profiles, and the CPU flag list loses
             // nothing by gaining separators.
+            Value::Verdict { value, advice, .. } => match advice {
+                Some(advice) => write!(f, "{value}  → {advice}"),
+                None => f.write_str(value),
+            },
             Value::List(items) => f.write_str(&items.join(", ")),
             // Text fallbacks, used by the JSON report and by any renderer that
             // does not draw these as graphics.

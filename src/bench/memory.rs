@@ -193,12 +193,23 @@ mod tests {
     fn l1_latency_is_physically_plausible() {
         // The point of an absolute bound is to catch the dependent-load chain
         // being optimised away, which would report a latency far below what
-        // any cache can achieve. That only means something in an optimised
-        // build: unoptimised, with bounds checks on every hop, this same
-        // chase measured 40.8 ns against 2.7 ns in release. So the ceiling
-        // follows the profile, while the floor — the part that catches a
-        // deleted chain — stays put.
-        let ceiling = if cfg!(debug_assertions) { 500.0 } else { 20.0 };
+        // any cache can achieve. The *floor* is what does that work; the
+        // ceiling only has to be loose enough never to fire on a healthy
+        // machine.
+        //
+        // It is deliberately loose. This runs inside a suite that executes
+        // the benchmark registry in parallel with everything else, so the
+        // measurement is taken on a machine saturating every core — and a
+        // 2.7 ns chase inflates by orders of magnitude under that kind of
+        // preemption and cache pressure. A tighter ceiling measured the load
+        // on the build machine rather than anything about the code, and
+        // failed once it did. Unoptimised the same chase measured 40.8 ns
+        // against 2.7 ns in release, so the profile still moves it.
+        let ceiling = if cfg!(debug_assertions) {
+            2000.0
+        } else {
+            500.0
+        };
 
         let small = chase(16 * 1024);
         assert!(

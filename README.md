@@ -345,6 +345,25 @@ Where hitui goes further than hardinfo2:
 - **Values that only mean something decoded, are decoded**: kernel taint
   `4097` as "proprietary module loaded, out-of-tree module loaded"; hardening
   sysctls as "1 — hidden from unprivileged users"; TCP state `0A` as `LISTEN`.
+- **Security flags what is weakly configured and says what to set.** A value
+  below what the kernel offers is drawn in `warn` or `danger` with the setting
+  to change it on the line beneath — `kernel.dmesg_restrict = 1`,
+  `lockdown=integrity`, `intel_iommu=on`. A value that is already right carries
+  no colour at all, so colour on the page always means there is something to
+  act on rather than decorating every correct row.
+
+  Two settings are reported and deliberately **not** graded, because the right
+  answer depends on what the machine is for and the page does not know that:
+  unprivileged user namespaces, which are an attack surface and also what
+  Flatpak, rootless podman, bubblewrap and Nix's build sandbox are built on;
+  and `kernel.modules_disabled`, a one-way switch that stops a machine
+  hotplugging hardware or switching generations. SELinux and AppArmor are
+  flagged jointly rather than separately — choosing between them is a decision
+  about how a system is built, and what is worth saying is that neither is
+  confining anything.
+
+  `--json` carries the verdict as `severity` and `advice`, so
+  `hitui --json security | jq '.. | select(.severity?)'` is an audit.
 - **Security** covers hardening sysctls, lockdown, module signing and
   IOMMU/passthrough readiness, which hardinfo2 does not report.
 - **Volumes render the stack as a stack.** A btrfs filesystem on a LUKS

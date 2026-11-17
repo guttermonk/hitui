@@ -11,7 +11,7 @@
 use anyhow::Result;
 
 use crate::collect::{Collector, Group};
-use crate::model::Node;
+use crate::model::{Node, Severity, Value};
 use crate::sysfs;
 
 pub struct Security;
@@ -53,37 +53,69 @@ fn access_control() -> Node {
 
     // SELinux and AppArmor are the two that actually confine anything, and
     // being compiled in is not the same as being enforcing.
-    node.push(Node::field(
-        "SELinux",
-        match sysfs::read("/sys/fs/selinux/enforce") {
-            Some(v) if v.trim() == "1" => "enforcing".to_string(),
-            Some(_) => "permissive".to_string(),
-            None => "not enabled".to_string(),
-        },
-    ));
+    let selinux = match sysfs::read("/sys/fs/selinux/enforce") {
+        Some(v) if v.trim() == "1" => "enforcing",
+        Some(_) => "permissive",
+        None => "not enabled",
+    };
+    let apparmor = std::path::Path::new("/sys/kernel/security/apparmor").is_dir();
+    node.push(Node::field("SELinux", selinux));
     node.push(Node::field(
         "AppArmor",
-        if std::path::Path::new("/sys/kernel/security/apparmor").is_dir() {
-            "enabled"
-        } else {
-            "not enabled"
-        },
+        if apparmor { "enabled" } else { "not enabled" },
     ));
+
+    // Flagged together rather than separately, because neither is a setting
+    // to turn on: choosing between SELinux and AppArmor is a decision about
+    // how a system is built, and telling someone running one of them to also
+    // run the other would be nonsense. What is worth saying is that nothing
+    // at all is confining anything.
+    if selinux == "not enabled" && !apparmor {
+        node.push(Node::field(
+            "Mandatory access control",
+            Value::warn(
+                "none — no LSM is confining processes",
+                "enable AppArmor or SELinux; which one depends on the distribution",
+            ),
+        ));
+    } else if selinux == "permissive" {
+        node.push(Node::field(
+            "Mandatory access control",
+            Value::warn(
+                "SELinux is loaded but permissive — denials are logged, not enforced",
+                "setenforce 1, and set SELINUX=enforcing to make it persist",
+            ),
+        ));
+    }
 
     // Lockdown restricts even root from reading kernel memory or loading
     // unsigned modules; it is absent unless compiled in.
     node.push(Node::field(
         "Kernel lockdown",
-        sysfs::read("/sys/kernel/security/lockdown")
+        match sysfs::read("/sys/kernel/security/lockdown") {
             // Reported as "[none] integrity confidentiality" with the active
             // mode bracketed.
-            .map(|modes| bracketed(&modes))
-            .unwrap_or_else(|| "not compiled in".to_string()),
+            Some(modes) => {
+                let active = bracketed(&modes);
+                if active == "none" {
+                    Value::warn(
+                        "none — root can read kernel memory and load unsigned modules",
+                        "boot with lockdown=integrity; confidentiality is stricter and \
+                         also blocks reading kernel memory",
+                    )
+                } else {
+                    Value::Text(active)
+                }
+            }
+            // No advice: a kernel built without the feature cannot be
+            // configured into having it.
+            None => Value::Text("not compiled in".to_string()),
+        },
     ));
 
     node.push(Node::field(
         "Ptrace scope",
-        describe(
+        graded(
             "/proc/sys/kernel/yama/ptrace_scope",
             &[
                 (0, "unrestricted; any process may trace any other"),
@@ -91,6 +123,9 @@ fn access_control() -> Node {
                 (2, "admin only"),
                 (3, "no tracing at all"),
             ],
+            1,
+            Severity::Warn,
+            "set kernel.yama.ptrace_scope = 1 so a process can only trace its own children",
         ),
     ));
     node
@@ -102,50 +137,66 @@ fn hardening() -> Node {
 
     node.push(Node::field(
         "Address space randomisation",
-        describe(
+        graded(
             "/proc/sys/kernel/randomize_va_space",
             &[
                 (0, "disabled"),
                 (1, "stack and mmap randomised"),
                 (2, "full, including the heap"),
             ],
+            2,
+            Severity::Danger,
+            "set kernel.randomize_va_space = 2; anything less leaves part of the \
+             address space predictable",
         ),
     ));
     node.push(Node::field(
         "Kernel pointer exposure",
-        describe(
+        graded(
             "/proc/sys/kernel/kptr_restrict",
             &[
                 (0, "addresses visible to everyone"),
                 (1, "hidden from unprivileged users"),
                 (2, "hidden from everyone"),
             ],
+            1,
+            Severity::Warn,
+            "set kernel.kptr_restrict = 1; kernel addresses in /proc defeat KASLR \
+             for anything that can read them",
         ),
     ));
     node.push(Node::field(
         "Kernel log access",
-        describe(
+        graded(
             "/proc/sys/kernel/dmesg_restrict",
             &[
                 (0, "readable by everyone"),
                 (1, "restricted to privileged users"),
             ],
+            1,
+            Severity::Warn,
+            "set kernel.dmesg_restrict = 1; the ring buffer carries addresses and \
+             hardware detail",
         ),
     ));
     node.push(Node::field(
         "Unprivileged BPF",
-        describe(
+        graded(
             "/proc/sys/kernel/unprivileged_bpf_disabled",
             &[
                 (0, "permitted"),
                 (1, "disabled permanently until reboot"),
                 (2, "disabled"),
             ],
+            1,
+            Severity::Danger,
+            "set kernel.unprivileged_bpf_disabled = 2; unprivileged BPF has been a \
+             recurring local privilege escalation surface",
         ),
     ));
     node.push(Node::field(
         "Performance events",
-        describe(
+        graded(
             "/proc/sys/kernel/perf_event_paranoid",
             &[
                 (-1, "unrestricted"),
@@ -153,8 +204,17 @@ fn hardening() -> Node {
                 (1, "CPU events restricted"),
                 (2, "kernel profiling restricted"),
             ],
+            2,
+            Severity::Warn,
+            "set kernel.perf_event_paranoid = 2; lower values let unprivileged \
+             processes sample the kernel",
         ),
     ));
+    // Reported and deliberately not graded. Unprivileged user namespaces are
+    // an attack surface and also what Flatpak, rootless podman, bubblewrap
+    // and Nix's own build sandbox are built on, so "set this to 0" is advice
+    // that breaks a working desktop. Which way it should go depends on what
+    // the machine is for, and this page does not know that.
     node.push(Node::field(
         "Unprivileged user namespaces",
         describe(
@@ -179,6 +239,10 @@ fn modules() -> Node {
             None => "not configurable on this kernel".to_string(),
         },
     ));
+    // Not graded either: kernel.modules_disabled is a one-way switch for the
+    // rest of the boot, and a machine that cannot load a module later cannot
+    // hotplug hardware or switch to a new NixOS generation. Worth knowing,
+    // not worth recommending.
     node.push(Node::field(
         "Loading disabled",
         describe(
@@ -212,11 +276,16 @@ fn virtualisation() -> Node {
     node.push(Node::field(
         "IOMMU",
         if groups > 0 {
-            format!("enabled — {groups} groups")
+            Value::Text(format!("enabled — {groups} groups"))
         } else {
-            // Without an IOMMU there is no safe device passthrough, which is
-            // the thing someone reading this page wants to know.
-            "not enabled — no device passthrough without it".to_string()
+            // Without an IOMMU there is no safe device passthrough, and
+            // nothing stops a plugged-in PCIe or Thunderbolt device from
+            // reading memory directly — which is a live concern on any
+            // machine with an external port wired to the PCIe bus.
+            Value::warn(
+                "not enabled — devices can reach memory directly, and passthrough is unsafe",
+                "boot with intel_iommu=on (or amd_iommu=on) for DMA protection",
+            )
         },
     ));
 
@@ -257,6 +326,39 @@ fn virtualisation() -> Node {
 ///
 /// Reports the number alongside the explanation: the number is what you set,
 /// the explanation is what you wanted to know.
+/// A sysctl with a recommended floor, reported with a verdict when it is not
+/// met.
+///
+/// Every setting this is used for runs "higher is more restrictive", so the
+/// verdict is whether the running value reaches the floor. The severity is
+/// given per setting rather than derived from the number, because the number
+/// says nothing about how much it matters: a readable kernel log leaks
+/// addresses, and unprivileged BPF has been a repeated route to root, and
+/// those are not the same finding.
+///
+/// A sysctl that does not exist is not a finding. The kernel may not have the
+/// knob, and a recommendation to set something that cannot be set is worse
+/// than silence.
+fn graded(
+    path: &str,
+    meanings: &[(i64, &str)],
+    least: i64,
+    severity: Severity,
+    advice: &str,
+) -> Value {
+    let described = describe(path, meanings);
+    let Some(value) = sysfs::read(path).and_then(|raw| raw.trim().parse::<i64>().ok()) else {
+        return Value::Text(described);
+    };
+    if value >= least {
+        return Value::Text(described);
+    }
+    match severity {
+        Severity::Warn => Value::warn(described, advice),
+        Severity::Danger => Value::danger(described, advice),
+    }
+}
+
 fn describe(path: &str, meanings: &[(i64, &str)]) -> String {
     let Some(raw) = sysfs::read(path) else {
         return "not available on this kernel".to_string();
@@ -294,6 +396,132 @@ mod tests {
         assert_eq!(bracketed("none [integrity] confidentiality"), "integrity");
         // No brackets at all: pass the text through rather than inventing.
         assert_eq!(bracketed("integrity"), "integrity");
+    }
+
+    #[test]
+    fn a_setting_that_meets_its_floor_carries_no_verdict() {
+        // Colour on this page has to mean "act on this". A correct value that
+        // came back as a green verdict would make the page a wall of colour
+        // in which the two rows that matter disappear.
+        //
+        // ASLR is 2 on any normal kernel, so this also asserts against the
+        // real machine rather than only against a fixture.
+        let value = graded(
+            "/proc/sys/kernel/randomize_va_space",
+            &[(2, "full")],
+            2,
+            Severity::Danger,
+            "should not be reached",
+        );
+        assert!(
+            matches!(value, Value::Text(_)),
+            "a value at its floor is plain text"
+        );
+    }
+
+    #[test]
+    fn a_missing_sysctl_is_not_a_finding() {
+        // The kernel may simply not have the knob, and recommending a setting
+        // that cannot be set is worse than silence.
+        let value = graded(
+            "/proc/sys/kernel/hitui_not_a_real_sysctl",
+            &[(1, "on")],
+            1,
+            Severity::Danger,
+            "should not be reached",
+        );
+        match value {
+            Value::Text(text) => assert_eq!(text, "not available on this kernel"),
+            other => panic!("expected plain text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_setting_below_its_floor_is_flagged_with_what_to_set() {
+        // Driven through a real sysctl that is certain to be below an absurd
+        // floor, so the grading path is exercised without inventing a file.
+        let value = graded(
+            "/proc/sys/kernel/randomize_va_space",
+            &[(2, "full, including the heap")],
+            99,
+            Severity::Warn,
+            "set kernel.randomize_va_space = 99",
+        );
+        match value {
+            Value::Verdict {
+                value,
+                severity,
+                advice,
+            } => {
+                assert_eq!(severity, Severity::Warn);
+                // The reported value still says what it *is*, decoded.
+                assert!(value.starts_with("2 — "), "{value}");
+                // And the advice says what to do, not merely that something
+                // is wrong.
+                let advice = advice.expect("a floor miss always carries advice");
+                assert!(advice.contains("kernel.randomize_va_space"), "{advice}");
+            }
+            other => panic!("expected a verdict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_recommendation_names_something_to_change() {
+        // A flag with no actionable fix is a complaint. Advice is allowed to
+        // be absent, but when present it has to name a setting, a boot
+        // parameter or a command.
+        let nodes = Security.collect().expect("collection failed");
+        let mut verdicts = 0;
+        for section in &nodes {
+            for field in &section.children {
+                let Some(Value::Verdict {
+                    value,
+                    advice,
+                    severity,
+                }) = field.value.as_ref()
+                else {
+                    continue;
+                };
+                verdicts += 1;
+                // The value is still reported, not replaced by the complaint.
+                assert!(!value.is_empty(), "{} has an empty value", field.label);
+                assert!(matches!(severity, Severity::Warn | Severity::Danger));
+                if let Some(advice) = advice {
+                    assert!(
+                        advice.contains('=')
+                            || advice.contains("enable")
+                            || advice.contains("boot with")
+                            || advice.contains("setenforce"),
+                        "{}: advice names nothing to change: {advice}",
+                        field.label
+                    );
+                }
+            }
+        }
+        // Not asserted to be non-zero: a well-configured machine should have
+        // no findings, and that is the point rather than a broken test.
+        let _ = verdicts;
+    }
+
+    #[test]
+    fn the_settings_that_depend_on_what_the_machine_is_for_are_not_graded() {
+        // Unprivileged user namespaces are an attack surface and also what
+        // Flatpak, rootless podman, bubblewrap and Nix's build sandbox are
+        // built on. kernel.modules_disabled is a one-way switch that stops a
+        // machine hotplugging hardware or switching generations. Both are
+        // worth reporting and neither is ours to recommend.
+        let nodes = Security.collect().expect("collection failed");
+        for label in ["Unprivileged user namespaces", "Loading disabled"] {
+            let field = nodes
+                .iter()
+                .flat_map(|section| section.children.iter())
+                .find(|field| field.label == label)
+                .unwrap_or_else(|| panic!("{label} is not reported"));
+            assert!(
+                !matches!(field.value, Some(Value::Verdict { .. })),
+                "{label} must be reported without a recommendation"
+            );
+        }
     }
 
     #[test]

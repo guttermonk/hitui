@@ -13,7 +13,7 @@ use ratatui::widgets::{
 use crate::app::{self, App, Focus, Row, SidebarItem};
 use crate::config::theme::Palette;
 use crate::keys::{Action, Keymaps, Mode};
-use crate::model::{Polarity, Value};
+use crate::model::{Polarity, Severity, Value};
 use crate::sysfs;
 
 /// Wide enough for the longest page title ("Environment Variables") plus its
@@ -370,6 +370,45 @@ fn flow_page(rows: &[&Row], width: usize, p: &Palette) -> Flow {
                     p,
                 ));
                 flow.push(Line::from(spans), &chain);
+            }
+            // The value in the colour its verdict earned, and the advice
+            // under it rather than beside it: a recommendation is a sentence,
+            // and putting it on the same line either pushes the value off the
+            // left of the reader's attention or wraps mid-advice.
+            Value::Verdict {
+                value,
+                severity,
+                advice,
+            } => {
+                let colour = match severity {
+                    Severity::Warn => p.warn,
+                    Severity::Danger => p.danger,
+                };
+                for (i, chunk) in wrap(value, value_width).iter().enumerate() {
+                    let label_span = if i == 0 {
+                        label_span.clone()
+                    } else {
+                        Span::raw(" ".repeat(label_width + 1))
+                    };
+                    flow.push(
+                        Line::from(vec![
+                            label_span,
+                            Span::styled(chunk.clone(), Style::default().fg(colour)),
+                        ]),
+                        &chain,
+                    );
+                }
+                if let Some(advice) = advice {
+                    for chunk in wrap(&format!("→ {advice}"), value_width) {
+                        flow.push(
+                            Line::from(vec![
+                                Span::raw(" ".repeat(label_width + 1)),
+                                Span::styled(chunk, dim(p)),
+                            ]),
+                            &chain,
+                        );
+                    }
+                }
             }
             _ => {
                 for (i, chunk) in wrap(&value.to_string(), value_width).iter().enumerate() {
@@ -1186,6 +1225,73 @@ mod tests {
             colour_at(SIDEBAR_WIDTH - 2),
             colour_at(buffer.area.width - 3),
         )
+    }
+
+    #[test]
+    fn a_flagged_value_is_drawn_in_its_severity_colour() {
+        // The whole point of the feature: a poorly configured setting has to
+        // be visible without reading every row.
+        let palette = Preset::GruvboxDark.palette();
+        let rows = [
+            Row {
+                depth: 0,
+                label: "Hardening".to_string(),
+                value: None,
+                source: None,
+                is_group: true,
+            },
+            Row {
+                depth: 1,
+                label: "Weak".to_string(),
+                value: Some(Value::warn("0 — readable by everyone", "set it to 1")),
+                source: None,
+                is_group: false,
+            },
+            Row {
+                depth: 1,
+                label: "Open".to_string(),
+                value: Some(Value::danger("0 — permitted", "set it to 2")),
+                source: None,
+                is_group: false,
+            },
+            Row {
+                depth: 1,
+                label: "Fine".to_string(),
+                value: Some(Value::Text("2 — disabled".to_string())),
+                source: None,
+                is_group: false,
+            },
+        ];
+        let rows: Vec<&Row> = rows.iter().collect();
+        let lines = flow_page(&rows, 70, &palette).lines;
+
+        let colour_of = |needle: &str| -> Option<Color> {
+            lines.iter().find_map(|line| {
+                line.spans
+                    .iter()
+                    .find(|span| span.content.contains(needle))
+                    .and_then(|span| span.style.fg)
+            })
+        };
+
+        assert_eq!(colour_of("readable by everyone"), Some(palette.warn));
+        assert_eq!(colour_of("0 — permitted"), Some(palette.danger));
+        // A value that is already right carries no colour at all — not even
+        // the foreground, since it is drawn unstyled and inherits the pane.
+        // That is what makes colour on this page always mean "act on this".
+        assert_eq!(colour_of("2 — disabled"), None);
+
+        // The advice is drawn under the value, dim, and marked as advice
+        // rather than running on as if it were part of the reading.
+        let advice = lines
+            .iter()
+            .find(|line| line.to_string().contains("set it to 1"))
+            .expect("the recommendation is drawn");
+        assert!(advice.to_string().contains('→'), "{}", advice.to_string());
+        assert_eq!(
+            advice.spans.last().and_then(|span| span.style.fg),
+            Some(palette.dim)
+        );
     }
 
     #[test]
